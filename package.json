@@ -1,0 +1,69 @@
+{
+  "name": "claude-connect",
+  "version": "1.0.0",
+  "description": "Bridge Claude Code sessions across machines",
+  "main": "dist/main/index.js",
+  "scripts": {
+    "build:main": "tsc --project tsconfig.main.json",
+    "build:mcp": "tsc --project tsconfig.mcp.json",
+    "build:renderer": "webpack --mode production",
+    "build": "npm run build:main && npm run build:mcp && npm run build:renderer",
+    "dev:renderer": "webpack serve --mode development",
+    "dev:main": "tsc --project tsconfig.main.json --watch",
+    "dev": "concurrently \"npm run dev:renderer\" \"npm run dev:main\"",
+    "start": "npm run build && electron .",
+    "mcp": "node dist/mcp/server.js",
+    "pack": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder",
+    "dist:win": "npm run build && electron-builder --win",
+    "dist:mac": "npm run build && electron-builder --mac"
+  },
+  "build": {
+    "appId": "com.claudeconnect.app",
+    "productName": "Claude Connect",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "node_modules/**/*"
+    ],
+    "mac": {
+      "target": ["dmg", "zip"],
+      "category": "public.app-category.developer-tools"
+    },
+    "win": {
+      "target": ["nsis", "portable"]
+    },
+    "linux": {
+      "target": ["AppImage"]
+    }
+  },
+  "keywords": ["claude", "mcp", "bridge", "sync"],
+  "author": "Johnny",
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {
+    "electron": "^41.0.3",
+    "electron-builder": "^26.8.1",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "uuid": "^13.0.0",
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@types/uuid": "^10.0.0",
+    "@types/ws": "^8.18.1",
+    "concurrently": "^9.2.1",
+    "css-loader": "^7.1.4",
+    "html-webpack-plugin": "^5.6.6",
+    "style-loader": "^4.0.0",
+    "ts-loader": "^9.5.4",
+    "typescript": "^5.9.3",
+    "webpack": "^5.105.4",
+    "webpack-cli": "^7.0.2",
+    "webpack-dev-server": "^5.2.3"
+  }
+}
