@@ -42,7 +42,7 @@ app.on('window-all-closed', () => {
 });
 
 // IPC handlers
-ipcMain.handle('start-server', async (_, port?: number) => {
+ipcMain.handle('start-server', async (_, port?: number, deviceName?: string) => {
   try {
     server = new RelayServer(port || DEFAULT_PORT);
     server.setEventHandler((event, data) => {
@@ -51,7 +51,7 @@ ipcMain.handle('start-server', async (_, port?: number) => {
     await server.start();
 
     // Also connect as a client to our own server
-    client = new RelayClient(os.hostname(), process.platform);
+    client = new RelayClient(deviceName || os.hostname(), process.platform);
     client.setEventHandler((event, data) => {
       mainWindow?.webContents.send('client-event', { event, data });
     });

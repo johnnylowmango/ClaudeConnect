@@ -110,7 +110,7 @@ export default function App() {
 
   const handleHost = async () => {
     const port = parseInt(portInput) || 3377;
-    const result = await ipcRenderer.invoke('start-server', port);
+    const result = await ipcRenderer.invoke('start-server', port, deviceName || undefined);
     if (result.success) {
       setMode('hosting');
       setStatus(`Hosting on port ${port}`);
@@ -201,11 +201,23 @@ export default function App() {
             {mode === 'idle' ? (
               <>
                 <div className="section">
+                  <h2>Name This Machine</h2>
+                  <p className="hint">Give this machine a name so the other side knows who you are.</p>
+                  <div className="input-row">
+                    <input
+                      placeholder={`e.g. "Johnny's MacBook", "Work PC"`}
+                      value={deviceName}
+                      onChange={e => setDeviceName(e.target.value)}
+                    />
+                  </div>
+                </div>
+
+                <div className="section">
                   <h2>Host a Session</h2>
-                  <p className="hint">Start a relay server. Other machines connect to you.</p>
+                  <p className="hint">Start a relay server on this machine. Share the IP below with the other machine so it can connect to you.</p>
                   {connectionInfo && (
                     <p className="hint">
-                      Your IP: {connectionInfo.addresses?.join(', ') || 'unknown'}
+                      Your IP: <strong style={{ color: 'var(--accent)' }}>{connectionInfo.addresses?.join(', ') || 'unknown'}</strong>
                     </p>
                   )}
                   <div className="input-row">
@@ -224,11 +236,11 @@ export default function App() {
                 <div className="divider">— or —</div>
 
                 <div className="section">
-                  <h2>Connect to Host</h2>
-                  <p className="hint">Enter the host machine's IP address.</p>
+                  <h2>Connect to a Host</h2>
+                  <p className="hint">Enter the IP address shown on the hosting machine.</p>
                   <div className="input-row">
                     <input
-                      placeholder="Host IP address"
+                      placeholder="Host's IP address"
                       value={hostInput}
                       onChange={e => setHostInput(e.target.value)}
                     />
@@ -238,13 +250,6 @@ export default function App() {
                       value={portInput}
                       onChange={e => setPortInput(e.target.value)}
                       style={{ width: 100 }}
-                    />
-                  </div>
-                  <div className="input-row">
-                    <input
-                      placeholder="Device name (optional)"
-                      value={deviceName}
-                      onChange={e => setDeviceName(e.target.value)}
                     />
                     <button className="btn btn-primary" onClick={handleConnect}>
                       Connect
@@ -295,14 +300,20 @@ export default function App() {
                       <span className="message-time">{formatTime(msg.timestamp)}</span>
                     </div>
                     <div className="message-body">
-                      {msg.type === 'context' ? (
+                      {msg.type === 'context' || msg.type === 'work-update' ? (
                         <div className="context-update">
                           <p>{msg.payload.summary}</p>
+                          {msg.payload.filesChanged?.length > 0 && (
+                            <p className="files">Files: {msg.payload.filesChanged.join(', ')}</p>
+                          )}
                           {msg.payload.activeFiles?.length > 0 && (
                             <p className="files">Files: {msg.payload.activeFiles.join(', ')}</p>
                           )}
                           {msg.payload.currentTask && (
                             <p className="task">Task: {msg.payload.currentTask}</p>
+                          )}
+                          {msg.payload.nextSteps && (
+                            <p className="next-steps">Next: {msg.payload.nextSteps}</p>
                           )}
                         </div>
                       ) : (
