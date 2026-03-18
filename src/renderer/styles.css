@@ -618,8 +618,8 @@ input:focus {
 
 /* Terminal */
 .content-terminal {
-  padding: 0;
-  overflow: hidden;
+  padding: 0 !important;
+  overflow: hidden !important;
 }
 
 .terminal-panel {

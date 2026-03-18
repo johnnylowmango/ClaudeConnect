@@ -620,24 +620,22 @@ export default function App() {
           </div>
         )}
 
-        {tab === 'terminal' && (
-          <div className="terminal-panel">
-            <div className="terminal-toolbar">
-              <button className="btn btn-primary" onClick={launchClaude}>
-                Launch Claude
-              </button>
-              <button className="btn btn-secondary" onClick={launchShell}>
-                Shell Only
-              </button>
-              {mode !== 'idle' && (
-                <span className="terminal-hint">
-                  Claude Code will have cross-machine sync tools ready
-                </span>
-              )}
-            </div>
-            <div className="terminal-container" ref={terminalRef} />
+        <div className="terminal-panel" style={{ display: tab === 'terminal' ? 'flex' : 'none' }}>
+          <div className="terminal-toolbar">
+            <button className="btn btn-primary" onClick={launchClaude}>
+              Launch Claude
+            </button>
+            <button className="btn btn-secondary" onClick={launchShell}>
+              Shell Only
+            </button>
+            {mode !== 'idle' && (
+              <span className="terminal-hint">
+                Claude Code will have cross-machine sync tools ready
+              </span>
+            )}
           </div>
-        )}
+          <div className="terminal-container" ref={terminalRef} />
+        </div>
       </main>
     </div>
   );
