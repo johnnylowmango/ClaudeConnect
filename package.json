@@ -28,24 +28,45 @@
       "dist/**/*",
       "node_modules/**/*"
     ],
+    "publish": {
+      "provider": "github",
+      "owner": "johnnylowmango",
+      "repo": "ClaudeConnect"
+    },
     "mac": {
-      "target": ["dmg", "zip"],
+      "target": [
+        "dmg",
+        "zip"
+      ],
       "category": "public.app-category.developer-tools"
     },
     "win": {
-      "target": ["nsis", "portable"]
+      "target": [
+        "nsis",
+        "portable"
+      ]
     },
     "linux": {
-      "target": ["AppImage"]
+      "target": [
+        "AppImage"
+      ]
     }
   },
-  "keywords": ["claude", "mcp", "bridge", "sync"],
+  "keywords": [
+    "claude",
+    "mcp",
+    "bridge",
+    "sync"
+  ],
   "author": "Johnny",
   "license": "MIT",
   "type": "commonjs",
   "dependencies": {
-    "electron": "^41.0.3",
-    "electron-builder": "^26.8.1",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-web-links": "^0.12.0",
+    "@xterm/xterm": "^6.0.0",
+    "electron-updater": "^6.8.3",
+    "node-pty": "^1.1.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "uuid": "^13.0.0",
@@ -58,6 +79,8 @@
     "@types/ws": "^8.18.1",
     "concurrently": "^9.2.1",
     "css-loader": "^7.1.4",
+    "electron": "^41.0.3",
+    "electron-builder": "^26.8.1",
     "html-webpack-plugin": "^5.6.6",
     "style-loader": "^4.0.0",
     "ts-loader": "^9.5.4",

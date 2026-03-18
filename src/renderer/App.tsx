@@ -1,9 +1,14 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import './styles.css';
 
 const { ipcRenderer } = (window as any).require('electron');
 
-type Tab = 'connect' | 'messages' | 'tasks' | 'clipboard';
+// Dynamic imports for xterm (loaded when terminal tab opens)
+let Terminal: any = null;
+let FitAddon: any = null;
+let WebLinksAddon: any = null;
+
+type Tab = 'connect' | 'messages' | 'tasks' | 'clipboard' | 'terminal';
 type Mode = 'idle' | 'hosting' | 'connected';
 
 interface Message {
@@ -37,6 +42,14 @@ interface ClipboardItem {
   createdAt: number;
 }
 
+interface UpdateInfo {
+  available: boolean;
+  version?: string;
+  downloading: boolean;
+  progress: number;
+  ready: boolean;
+}
+
 export default function App() {
   const [tab, setTab] = useState<Tab>('connect');
   const [mode, setMode] = useState<Mode>('idle');
@@ -53,7 +66,17 @@ export default function App() {
   const [clipboardLabel, setClipboardLabel] = useState('');
   const [status, setStatus] = useState('Disconnected');
   const [connectionInfo, setConnectionInfo] = useState<any>(null);
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo>({
+    available: false, downloading: false, progress: 0, ready: false,
+  });
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Terminal state
+  const terminalRef = useRef<HTMLDivElement>(null);
+  const termInstanceRef = useRef<any>(null);
+  const fitAddonRef = useRef<any>(null);
+  const termIdRef = useRef<number | null>(null);
+  const [termReady, setTermReady] = useState(false);
 
   useEffect(() => {
     ipcRenderer.invoke('get-connection-info').then(setConnectionInfo);
@@ -98,15 +121,177 @@ export default function App() {
       }
     });
 
+    ipcRenderer.on('updater-event', (_: any, data: any) => {
+      switch (data.event) {
+        case 'update-available':
+          setUpdateInfo(prev => ({ ...prev, available: true, version: data.version }));
+          break;
+        case 'download-progress':
+          setUpdateInfo(prev => ({ ...prev, downloading: true, progress: data.percent }));
+          break;
+        case 'update-downloaded':
+          setUpdateInfo(prev => ({ ...prev, downloading: false, ready: true }));
+          break;
+      }
+    });
+
+    // Listen for terminal data
+    ipcRenderer.on('terminal-data', (_: any, { id, data }: any) => {
+      if (termInstanceRef.current && id === termIdRef.current) {
+        termInstanceRef.current.write(data);
+      }
+    });
+
+    ipcRenderer.on('terminal-exit', (_: any, { id }: any) => {
+      if (id === termIdRef.current) {
+        termInstanceRef.current?.write('\r\n\x1b[90m[Terminal exited. Click "Launch Claude" to start a new session.]\x1b[0m\r\n');
+        termIdRef.current = null;
+      }
+    });
+
     return () => {
       ipcRenderer.removeAllListeners('client-event');
       ipcRenderer.removeAllListeners('server-event');
+      ipcRenderer.removeAllListeners('updater-event');
+      ipcRenderer.removeAllListeners('terminal-data');
+      ipcRenderer.removeAllListeners('terminal-exit');
     };
   }, []);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  // Initialize terminal when tab is shown
+  const initTerminal = useCallback(async () => {
+    if (termInstanceRef.current || !terminalRef.current) return;
+
+    try {
+      // Load xterm modules
+      if (!Terminal) {
+        const xtermMod = require('@xterm/xterm');
+        const fitMod = require('@xterm/addon-fit');
+        const linksMod = require('@xterm/addon-web-links');
+        Terminal = xtermMod.Terminal;
+        FitAddon = fitMod.FitAddon;
+        WebLinksAddon = linksMod.WebLinksAddon;
+
+        // Load xterm CSS
+        const link = document.createElement('link');
+        link.rel = 'stylesheet';
+        link.href = require.resolve('@xterm/xterm/css/xterm.css');
+        document.head.appendChild(link);
+      }
+
+      const fitAddon = new FitAddon();
+      fitAddonRef.current = fitAddon;
+
+      const term = new Terminal({
+        fontFamily: "'SF Mono', 'Fira Code', 'Cascadia Code', monospace",
+        fontSize: 13,
+        lineHeight: 1.4,
+        cursorBlink: true,
+        cursorStyle: 'bar',
+        theme: {
+          background: '#08090c',
+          foreground: '#e8e9ed',
+          cursor: '#7c8aff',
+          cursorAccent: '#08090c',
+          selectionBackground: 'rgba(124, 138, 255, 0.3)',
+          black: '#1a1b26',
+          red: '#e05c5c',
+          green: '#4a9e6b',
+          yellow: '#e0a55c',
+          blue: '#5b7cc5',
+          magenta: '#a78bfa',
+          cyan: '#6ee7b7',
+          white: '#e8e9ed',
+          brightBlack: '#444b6a',
+          brightRed: '#ff7a93',
+          brightGreen: '#6ee7b7',
+          brightYellow: '#ffd580',
+          brightBlue: '#7c8aff',
+          brightMagenta: '#c3a6ff',
+          brightCyan: '#7ee5c2',
+          brightWhite: '#ffffff',
+        },
+      });
+
+      term.loadAddon(fitAddon);
+      term.loadAddon(new WebLinksAddon());
+      term.open(terminalRef.current);
+      fitAddon.fit();
+
+      termInstanceRef.current = term;
+      setTermReady(true);
+
+      // Handle resize
+      const resizeObserver = new ResizeObserver(() => {
+        try {
+          fitAddon.fit();
+          if (termIdRef.current !== null) {
+            ipcRenderer.invoke('terminal-resize', termIdRef.current, term.cols, term.rows);
+          }
+        } catch {}
+      });
+      resizeObserver.observe(terminalRef.current);
+
+      // Handle input
+      term.onData((data: string) => {
+        if (termIdRef.current !== null) {
+          ipcRenderer.invoke('terminal-write', termIdRef.current, data);
+        }
+      });
+
+      term.write('\x1b[38;2;124;138;255m');
+      term.write('  ╔══════════════════════════════════════╗\r\n');
+      term.write('  ║         Claude Connect Terminal       ║\r\n');
+      term.write('  ╚══════════════════════════════════════╝\r\n');
+      term.write('\x1b[0m\r\n');
+      term.write('\x1b[90mClick "Launch Claude" to start a Claude Code session\r\n');
+      term.write('with cross-machine sync tools pre-configured.\x1b[0m\r\n\r\n');
+    } catch (err) {
+      console.error('Failed to init terminal:', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (tab === 'terminal') {
+      setTimeout(() => initTerminal(), 50);
+    }
+    if (tab === 'terminal' && fitAddonRef.current) {
+      setTimeout(() => {
+        try { fitAddonRef.current.fit(); } catch {}
+      }, 100);
+    }
+  }, [tab, initTerminal]);
+
+  const launchClaude = async () => {
+    // Kill existing terminal if any
+    if (termIdRef.current !== null) {
+      await ipcRenderer.invoke('terminal-kill', termIdRef.current);
+      termIdRef.current = null;
+    }
+
+    const result = await ipcRenderer.invoke('terminal-create');
+    if (result.success) {
+      termIdRef.current = result.id;
+      // Send 'claude' command to start Claude Code
+      await ipcRenderer.invoke('terminal-write', result.id, 'claude\n');
+    }
+  };
+
+  const launchShell = async () => {
+    if (termIdRef.current !== null) {
+      await ipcRenderer.invoke('terminal-kill', termIdRef.current);
+      termIdRef.current = null;
+    }
+
+    const result = await ipcRenderer.invoke('terminal-create');
+    if (result.success) {
+      termIdRef.current = result.id;
+    }
+  };
 
   const handleHost = async () => {
     const port = parseInt(portInput) || 3377;
@@ -164,6 +349,14 @@ export default function App() {
     setClipboardLabel('');
   };
 
+  const handleDownloadUpdate = async () => {
+    await ipcRenderer.invoke('download-update');
+  };
+
+  const handleInstallUpdate = async () => {
+    await ipcRenderer.invoke('install-update');
+  };
+
   const formatTime = (ts: number) => {
     return new Date(ts).toLocaleTimeString();
   };
@@ -173,6 +366,19 @@ export default function App() {
       <header className="header">
         <h1>Claude Connect</h1>
         <div className="status-bar">
+          {updateInfo.available && !updateInfo.ready && !updateInfo.downloading && (
+            <button className="btn btn-small btn-update" onClick={handleDownloadUpdate}>
+              Update v{updateInfo.version}
+            </button>
+          )}
+          {updateInfo.downloading && (
+            <span className="update-progress">Downloading... {updateInfo.progress}%</span>
+          )}
+          {updateInfo.ready && (
+            <button className="btn btn-small btn-update" onClick={handleInstallUpdate}>
+              Restart to Update
+            </button>
+          )}
           <span className={`status-dot ${mode !== 'idle' ? 'online' : 'offline'}`} />
           <span>{status}</span>
           {mode !== 'idle' && (
@@ -184,7 +390,7 @@ export default function App() {
       </header>
 
       <nav className="tabs">
-        {(['connect', 'messages', 'tasks', 'clipboard'] as Tab[]).map(t => (
+        {(['connect', 'messages', 'tasks', 'clipboard', 'terminal'] as Tab[]).map(t => (
           <button
             key={t}
             className={`tab ${tab === t ? 'active' : ''}`}
@@ -195,7 +401,7 @@ export default function App() {
         ))}
       </nav>
 
-      <main className="content">
+      <main className={`content ${tab === 'terminal' ? 'content-terminal' : ''}`}>
         {tab === 'connect' && (
           <div className="panel">
             {mode === 'idle' ? (
@@ -411,6 +617,25 @@ export default function App() {
                 ))
               )}
             </div>
+          </div>
+        )}
+
+        {tab === 'terminal' && (
+          <div className="terminal-panel">
+            <div className="terminal-toolbar">
+              <button className="btn btn-primary" onClick={launchClaude}>
+                Launch Claude
+              </button>
+              <button className="btn btn-secondary" onClick={launchShell}>
+                Shell Only
+              </button>
+              {mode !== 'idle' && (
+                <span className="terminal-hint">
+                  Claude Code will have cross-machine sync tools ready
+                </span>
+              )}
+            </div>
+            <div className="terminal-container" ref={terminalRef} />
           </div>
         )}
       </main>

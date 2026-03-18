@@ -12,6 +12,10 @@ module.exports = {
   resolve: {
     extensions: ['.ts', '.tsx', '.js', '.jsx'],
   },
+  externals: {
+    // node-pty is native and loaded in main process, not renderer
+    'node-pty': 'commonjs node-pty',
+  },
   module: {
     rules: [
       {
