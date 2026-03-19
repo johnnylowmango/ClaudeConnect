@@ -550,6 +550,11 @@ export default function App() {
           )}
           <span className="status-dot online" />
           <span className="status-text">{status}</span>
+          {mode === 'hosting' && connectionInfo?.addresses?.[0] && (
+            <span className="header-ip" title="Share this with other machines">
+              {connectionInfo.addresses[0]}:{portInput}
+            </span>
+          )}
           {projectFolder && (
             <span className="header-project" onClick={handleSelectFolder} title="Click to change">
               {projectFolder.split('/').pop() || projectFolder}

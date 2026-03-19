@@ -214,6 +214,20 @@ body {
   text-overflow: ellipsis;
 }
 
+.header-ip {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  padding: 3px 10px;
+  background: var(--accent-glow);
+  border: 1px solid rgba(124, 138, 255, 0.2);
+  border-radius: var(--radius-xs);
+  cursor: default;
+  user-select: all;
+  letter-spacing: 0.5px;
+}
+
 .header-project {
   font-size: 11px;
   color: var(--text-muted);
