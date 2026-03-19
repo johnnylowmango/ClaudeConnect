@@ -22,6 +22,7 @@ export class RelayServer {
   private tasks: TaskItem[] = [];
   private clipboard: ClipboardEntry[] = [];
   private onEvent?: (event: string, data: any) => void;
+  private pingInterval: NodeJS.Timeout | null = null;
 
   constructor(private port: number = DEFAULT_PORT) {}
 
@@ -37,6 +38,16 @@ export class RelayServer {
         this.wss.on('listening', () => {
           console.log(`Claude Connect relay server running on port ${this.port}`);
           this.emit('server-started', { port: this.port });
+
+          // Keep-alive: ping all clients every 15s to prevent timeout
+          this.pingInterval = setInterval(() => {
+            for (const [, client] of this.clients) {
+              if (client.ws.readyState === WebSocket.OPEN) {
+                client.ws.ping();
+              }
+            }
+          }, 15000);
+
           resolve();
         });
 
@@ -55,6 +66,10 @@ export class RelayServer {
   }
 
   stop(): void {
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+      this.pingInterval = null;
+    }
     if (this.wss) {
       for (const [, client] of this.clients) {
         client.ws.close();

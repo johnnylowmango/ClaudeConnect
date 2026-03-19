@@ -71,6 +71,10 @@ export class RelayClient {
     if (this.reconnectTimer) return;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
+      if (this.ws) {
+        try { this.ws.removeAllListeners(); this.ws.close(); } catch {}
+        this.ws = null;
+      }
       this.connect(host, port).catch(() => {
         // will retry on close
       });

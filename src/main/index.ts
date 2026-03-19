@@ -84,7 +84,20 @@ function injectIntoTerminal(termId: number, text: string, promptId: string) {
 }
 
 function stripAnsi(text: string): string {
-  return text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
+  return text
+    // CSI sequences (e.g. \x1b[0m, \x1b[?2026h, \x1b[38;2;...m)
+    .replace(/\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]/g, '')
+    // OSC sequences (e.g. \x1b]0;title\x07)
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+    // Other escape sequences (2-char)
+    .replace(/\x1b[^[\]]/g, '')
+    // Carriage returns
+    .replace(/\r/g, '')
+    // Strip lines that are just box-drawing or whitespace
+    .replace(/^[─━═╔╗╚╝║╠╣╬┌┐└┘├┤┬┴┼│─\s]+$/gm, '')
+    // Collapse multiple blank lines
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
 // --- MCP auto-config ---
@@ -354,9 +367,9 @@ ipcMain.handle('terminal-create', async (_, cwd?: string) => {
     // Buffer output for Command Center response streaming
     const existing = terminalOutputBuffers.get(id) || '';
     terminalOutputBuffers.set(id, existing + data);
-    // Send stripped output to Command Center
+    // Send stripped output to Command Center (debounced to reduce noise)
     const stripped = stripAnsi(data);
-    if (stripped.trim()) {
+    if (stripped.trim() && stripped.length > 1) {
       mainWindow?.webContents.send('command-terminal-output', {
         termId: id, text: stripped,
       });
