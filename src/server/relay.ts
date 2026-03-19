@@ -197,6 +197,26 @@ export class RelayServer {
         break;
       }
 
+      case 'mcp-trigger-sync': {
+        // MCP server asks the local Electron app to do a file sync
+        // Route to all clients with the same device name (the Electron app)
+        const senderDevice = this.clients.get(clientId)?.device;
+        if (senderDevice) {
+          for (const [id, c] of this.clients) {
+            if (id !== clientId && c.device.name === senderDevice.name && c.ws.readyState === WebSocket.OPEN) {
+              c.ws.send(JSON.stringify({
+                type: 'mcp-trigger-sync',
+                direction: msg.direction,
+                target: msg.target,
+                syncId: msg.syncId,
+                filePaths: msg.filePaths,
+              }));
+            }
+          }
+        }
+        break;
+      }
+
       case 'set-project': {
         const client = this.clients.get(clientId);
         if (client) {

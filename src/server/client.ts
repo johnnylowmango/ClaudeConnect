@@ -115,6 +115,9 @@ export class RelayClient {
       case 'file-manifest-response':
         this.emit('file-manifest-response', msg);
         break;
+      case 'mcp-trigger-sync':
+        this.emit('mcp-trigger-sync', msg);
+        break;
     }
   }
 

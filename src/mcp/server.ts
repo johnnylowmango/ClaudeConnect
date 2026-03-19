@@ -11,7 +11,7 @@ const RELAY_HOST = process.env.CLAUDE_CONNECT_HOST || 'localhost';
 const RELAY_PORT = parseInt(process.env.CLAUDE_CONNECT_PORT || '3377');
 const DEVICE_NAME = process.env.CLAUDE_CONNECT_DEVICE || `claude-${process.platform}-${process.pid}`;
 const DEVICE_ROLE = process.env.CLAUDE_CONNECT_ROLE || '';
-const PROJECT_PATH = process.env.CLAUDE_CONNECT_PROJECT || '';
+let projectPath = process.env.CLAUDE_CONNECT_PROJECT || '';
 
 let ws: WebSocket | null = null;
 let connected = false;
@@ -42,6 +42,14 @@ function connectToRelay() {
   }
 }
 
+function updateProjectPathFromDevices() {
+  // Pick up our own project path from the device list (set by Electron app via relay)
+  const self = devices.find((d: any) => d.name === DEVICE_NAME);
+  if (self?.projectPath) {
+    projectPath = self.projectPath;
+  }
+}
+
 function handleRelayMessage(msg: any) {
   switch (msg.type) {
     case 'welcome':
@@ -52,6 +60,7 @@ function handleRelayMessage(msg: any) {
       conversationLog = (msg.recentMessages || []).filter(
         (m: any) => ['context', 'chat', 'work-update'].includes(m.type)
       );
+      updateProjectPathFromDevices();
       break;
     case 'message':
       recentMessages.push(msg.message);
@@ -63,6 +72,12 @@ function handleRelayMessage(msg: any) {
       break;
     case 'device-connected': devices.push(msg.device); break;
     case 'device-disconnected': devices = devices.filter((d: any) => d.name !== msg.device.name); break;
+    case 'device-updated': {
+      const idx = devices.findIndex((d: any) => d.name === msg.device.name);
+      if (idx >= 0) devices[idx] = msg.device; else devices.push(msg.device);
+      updateProjectPathFromDevices();
+      break;
+    }
     case 'task-update': {
       const idx = tasks.findIndex((t: any) => t.id === msg.task.id);
       if (idx >= 0) tasks[idx] = msg.task; else tasks.push(msg.task);
@@ -72,6 +87,7 @@ function handleRelayMessage(msg: any) {
     case 'state':
       devices = msg.devices || []; recentMessages = msg.messages || [];
       tasks = msg.tasks || []; clipboard = msg.clipboard || [];
+      updateProjectPathFromDevices();
       break;
   }
 }
@@ -102,6 +118,7 @@ function handleTool(name: string, args: any): any {
   switch (name) {
     case 'cc_sync': return {
       thisDevice: DEVICE_NAME, role: DEVICE_ROLE || 'not set', connected,
+      projectPath: projectPath || 'not set — select a project folder in the Claude Connect app',
       connectedDevices: devices,
       recentActivityFromOthers: conversationLog.filter((m: any) => m.from !== DEVICE_NAME).slice(-30)
         .map((m: any) => ({ from: m.from, time: new Date(m.timestamp).toLocaleTimeString(), type: m.type, content: m.payload?.summary || m.payload?.text || m.payload })),
@@ -136,23 +153,25 @@ function handleTool(name: string, args: any): any {
     case 'cc_get_devices':
       return { devices, thisDevice: DEVICE_NAME, connected };
     case 'cc_push_files': {
-      if (!PROJECT_PATH) return { error: 'No project folder configured. Select a project folder in the Claude Connect app first.' };
+      if (!projectPath) return { error: 'No project folder configured. Select a project folder in the Claude Connect app first.' };
       const syncId = `mcp-push-${Date.now()}`;
-      relaySend({ action: 'file-sync-request', target: args.target, syncId, manifest: [], direction: 'push', filePaths: args.files });
-      return { success: true, syncId, message: `Push request sent to ${args.target}. The Electron app handles the actual file transfer.` };
+      // Tell the local Electron app to initiate push (it has the file I/O)
+      relaySend({ action: 'mcp-trigger-sync', direction: 'push', target: args.target, syncId, filePaths: args.files });
+      return { success: true, syncId, message: `Push to ${args.target} triggered. The Claude Connect app is handling the file transfer.` };
     }
     case 'cc_pull_files': {
-      if (!PROJECT_PATH) return { error: 'No project folder configured. Select a project folder in the Claude Connect app first.' };
+      if (!projectPath) return { error: 'No project folder configured. Select a project folder in the Claude Connect app first.' };
       const syncId = `mcp-pull-${Date.now()}`;
-      relaySend({ action: 'file-sync-request', target: args.target, syncId, manifest: [], direction: 'pull' });
-      return { success: true, syncId, message: `Pull request sent to ${args.target}. Files will be synced by the Electron app.` };
+      // Tell the local Electron app to initiate pull
+      relaySend({ action: 'mcp-trigger-sync', direction: 'pull', target: args.target, syncId });
+      return { success: true, syncId, message: `Pull from ${args.target} triggered. The Claude Connect app is handling the file transfer.` };
     }
     case 'cc_project_status': {
-      if (!PROJECT_PATH) return { error: 'No project folder configured. Select a project folder in the Claude Connect app first.' };
+      if (!projectPath) return { error: 'No project folder configured. Select a project folder in the Claude Connect app first.' };
       const targetDevice = devices.find((d: any) => d.name === args.target);
       return {
         thisDevice: DEVICE_NAME,
-        projectPath: PROJECT_PATH,
+        projectPath,
         target: args.target,
         targetProjectPath: targetDevice?.projectPath || 'unknown',
         targetOnline: !!targetDevice && targetDevice.status === 'online',

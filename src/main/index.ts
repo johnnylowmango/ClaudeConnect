@@ -21,6 +21,9 @@ let server: RelayServer | null = null;
 let client: RelayClient | null = null;
 let mcpInstalled = false;
 let projectPath: string | null = null;
+let lastMcpDevice: string = '';
+let lastMcpRole: string = '';
+let lastMcpHost: string = '';
 
 // Track active terminal processes
 const terminals: Map<number, any> = new Map();
@@ -65,6 +68,11 @@ function getNodePath(): string {
 }
 
 function installMcpConfig(deviceName: string, role: string, host: string) {
+  // Remember params so we can re-install when project folder changes
+  lastMcpDevice = deviceName || os.hostname();
+  lastMcpRole = role || '';
+  lastMcpHost = host || 'localhost';
+
   try {
     const configPath = getClaudeConfigPath();
     let config: any = {};
@@ -78,9 +86,9 @@ function installMcpConfig(deviceName: string, role: string, host: string) {
       command: getNodePath(),
       args: [getMcpServerPath()],
       env: {
-        CLAUDE_CONNECT_DEVICE: deviceName || os.hostname(),
-        CLAUDE_CONNECT_ROLE: role || '',
-        CLAUDE_CONNECT_HOST: host || 'localhost',
+        CLAUDE_CONNECT_DEVICE: lastMcpDevice,
+        CLAUDE_CONNECT_ROLE: lastMcpRole,
+        CLAUDE_CONNECT_HOST: lastMcpHost,
         CLAUDE_CONNECT_PORT: String(DEFAULT_PORT),
         ...(projectPath ? { CLAUDE_CONNECT_PROJECT: projectPath } : {}),
       },
@@ -88,7 +96,7 @@ function installMcpConfig(deviceName: string, role: string, host: string) {
 
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
     mcpInstalled = true;
-    console.log('MCP config installed');
+    console.log('MCP config installed' + (projectPath ? ` (project: ${projectPath})` : ''));
   } catch (err) {
     console.error('Failed to install MCP config:', err);
   }
@@ -393,6 +401,39 @@ function handleFileSyncEvent(event: string, data: any) {
       });
       break;
     }
+
+    case 'mcp-trigger-sync': {
+      // MCP server asked us to do a sync — we have the filesystem access
+      if (data.direction === 'push') {
+        const manifest = buildManifest(projectPath);
+        if (data.filePaths && data.filePaths.length > 0) {
+          // Push specific files
+          let completed = 0;
+          for (const filePath of data.filePaths) {
+            const chunks = readFileChunked(projectPath, filePath, data.syncId);
+            for (const chunk of chunks) {
+              client!.sendFileChunk(data.target, chunk);
+            }
+            completed++;
+          }
+          mainWindow?.webContents.send('file-sync-progress', {
+            syncId: data.syncId, phase: 'done',
+            totalFiles: data.filePaths.length, completedFiles: data.filePaths.length,
+          });
+        } else {
+          // Push all changed files — request remote manifest first
+          client!.requestFileSync(data.target, data.syncId, manifest, 'push');
+        }
+      } else if (data.direction === 'pull') {
+        const manifest = buildManifest(projectPath);
+        client!.requestFileSync(data.target, data.syncId, manifest, 'pull');
+      }
+      mainWindow?.webContents.send('file-sync-progress', {
+        syncId: data.syncId, phase: data.direction === 'push' ? 'transferring' : 'scanning',
+        totalFiles: 0, completedFiles: 0,
+      });
+      break;
+    }
   }
 }
 
@@ -504,6 +545,16 @@ ipcMain.handle('get-connection-info', async () => {
 
 // --- Project Folder IPC ---
 
+function applyProjectPath(newPath: string) {
+  projectPath = newPath;
+  // Tell relay so other devices see our project path
+  client?.setProject(projectPath);
+  // Re-write MCP config so new Claude sessions get the project env var
+  if (mcpInstalled) {
+    installMcpConfig(lastMcpDevice, lastMcpRole, lastMcpHost);
+  }
+}
+
 ipcMain.handle('select-project-folder', async () => {
   if (!mainWindow) return { success: false, error: 'No window' };
   const result = await dialog.showOpenDialog(mainWindow, {
@@ -513,8 +564,7 @@ ipcMain.handle('select-project-folder', async () => {
   if (result.canceled || !result.filePaths[0]) {
     return { success: false };
   }
-  projectPath = result.filePaths[0];
-  client?.setProject(projectPath);
+  applyProjectPath(result.filePaths[0]);
   return { success: true, path: projectPath };
 });
 
@@ -523,8 +573,7 @@ ipcMain.handle('get-project-folder', async () => {
 });
 
 ipcMain.handle('set-project-folder', async (_, folderPath: string) => {
-  projectPath = folderPath;
-  client?.setProject(projectPath);
+  applyProjectPath(folderPath);
   return { success: true, path: projectPath };
 });
 
