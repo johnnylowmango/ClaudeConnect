@@ -8,7 +8,7 @@ let Terminal: any = null;
 let FitAddon: any = null;
 let WebLinksAddon: any = null;
 
-type Tab = 'connect' | 'messages' | 'tasks' | 'clipboard' | 'terminal';
+type Tab = 'connect' | 'messages' | 'tasks' | 'clipboard' | 'files' | 'terminal';
 type Mode = 'idle' | 'hosting' | 'connected';
 
 interface Message {
@@ -69,6 +69,12 @@ export default function App() {
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo>({
     available: false, downloading: false, progress: 0, ready: false,
   });
+  const [badges, setBadges] = useState({ messages: 0, tasks: 0, clipboard: 0, files: 0 });
+  const [projectFolder, setProjectFolder] = useState<string | null>(null);
+  const [syncStatus, setSyncStatus] = useState<{ phase: string; totalFiles: number; completedFiles: number; currentFile?: string } | null>(null);
+  const [syncTarget, setSyncTarget] = useState('');
+  const [fileManifest, setFileManifest] = useState<any[]>([]);
+  const tabRef = useRef<Tab>('connect');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Terminal state
@@ -77,6 +83,16 @@ export default function App() {
   const fitAddonRef = useRef<any>(null);
   const termIdRef = useRef<number | null>(null);
   const [termReady, setTermReady] = useState(false);
+
+  // Keep tabRef in sync for badge logic in event handlers
+  useEffect(() => { tabRef.current = tab; }, [tab]);
+
+  // Load project folder on mount
+  useEffect(() => {
+    ipcRenderer.invoke('get-project-folder').then((r: any) => {
+      if (r.path) setProjectFolder(r.path);
+    });
+  }, []);
 
   useEffect(() => {
     ipcRenderer.invoke('get-connection-info').then(setConnectionInfo);
@@ -98,7 +114,6 @@ export default function App() {
               Math.abs(m.timestamp - data.timestamp) < 5000
             );
             if (dominated) {
-              // Replace the optimistic message with the real one
               return prev.map(m =>
                 m.id.startsWith('local-') &&
                 m.payload?.text === data.payload?.text &&
@@ -108,12 +123,18 @@ export default function App() {
             }
             return [...prev, data];
           });
+          if (tabRef.current !== 'messages') {
+            setBadges(prev => ({ ...prev, messages: prev.messages + 1 }));
+          }
           break;
         case 'device-connected':
           setDevices(prev => [...prev.filter(d => d.name !== data.name), data]);
           break;
         case 'device-disconnected':
           setDevices(prev => prev.filter(d => d.name !== data.name));
+          break;
+        case 'device-updated':
+          setDevices(prev => prev.map(d => d.name === data.name ? { ...d, ...data } : d));
           break;
         case 'task-update':
           setTasks(prev => {
@@ -125,9 +146,15 @@ export default function App() {
             }
             return [...prev, data];
           });
+          if (tabRef.current !== 'tasks') {
+            setBadges(prev => ({ ...prev, tasks: prev.tasks + 1 }));
+          }
           break;
         case 'clipboard-update':
           setClipboard(prev => [data, ...prev].slice(0, 50));
+          if (tabRef.current !== 'clipboard') {
+            setBadges(prev => ({ ...prev, clipboard: prev.clipboard + 1 }));
+          }
           break;
         case 'connected':
           setStatus('Connected');
@@ -152,6 +179,25 @@ export default function App() {
       }
     });
 
+    // Listen for file sync progress
+    ipcRenderer.on('file-sync-progress', (_: any, status: any) => {
+      setSyncStatus(status);
+      if (status.phase === 'done') {
+        setTimeout(() => setSyncStatus(null), 3000);
+      }
+      if (tabRef.current !== 'files') {
+        setBadges(prev => ({ ...prev, files: prev.files + 1 }));
+      }
+    });
+
+    ipcRenderer.on('file-manifest-diff', (_: any, diff: any) => {
+      setSyncStatus({
+        phase: `${diff.toPush.length} to push, ${diff.toPull.length} to pull`,
+        totalFiles: diff.toPush.length + diff.toPull.length,
+        completedFiles: 0,
+      });
+    });
+
     // Listen for terminal data
     ipcRenderer.on('terminal-data', (_: any, { id, data }: any) => {
       if (termInstanceRef.current && id === termIdRef.current) {
@@ -172,6 +218,8 @@ export default function App() {
       ipcRenderer.removeAllListeners('updater-event');
       ipcRenderer.removeAllListeners('terminal-data');
       ipcRenderer.removeAllListeners('terminal-exit');
+      ipcRenderer.removeAllListeners('file-sync-progress');
+      ipcRenderer.removeAllListeners('file-manifest-diff');
     };
   }, []);
 
@@ -399,6 +447,37 @@ export default function App() {
     setClipboardLabel('');
   };
 
+  const switchTab = (t: Tab) => {
+    setTab(t);
+    setBadges(prev => ({ ...prev, [t]: 0 }));
+  };
+
+  const handleSelectFolder = async () => {
+    const result = await ipcRenderer.invoke('select-project-folder');
+    if (result.success) {
+      setProjectFolder(result.path);
+    }
+  };
+
+  const handlePushFiles = async () => {
+    if (!syncTarget) return;
+    setSyncStatus({ phase: 'scanning', totalFiles: 0, completedFiles: 0 });
+    await ipcRenderer.invoke('push-files', syncTarget);
+  };
+
+  const handlePullFiles = async () => {
+    if (!syncTarget) return;
+    setSyncStatus({ phase: 'scanning', totalFiles: 0, completedFiles: 0 });
+    await ipcRenderer.invoke('pull-files', syncTarget);
+  };
+
+  const handleRefreshManifest = async () => {
+    const result = await ipcRenderer.invoke('get-file-manifest');
+    if (result.success) {
+      setFileManifest(result.manifest);
+    }
+  };
+
   const handleDownloadUpdate = async () => {
     await ipcRenderer.invoke('download-update');
   };
@@ -440,13 +519,16 @@ export default function App() {
       </header>
 
       <nav className="tabs">
-        {(['connect', 'messages', 'tasks', 'clipboard', 'terminal'] as Tab[]).map(t => (
+        {(['connect', 'messages', 'tasks', 'clipboard', 'files', 'terminal'] as Tab[]).map(t => (
           <button
             key={t}
             className={`tab ${tab === t ? 'active' : ''}`}
-            onClick={() => setTab(t)}
+            onClick={() => switchTab(t)}
           >
             {t.charAt(0).toUpperCase() + t.slice(1)}
+            {(badges as any)[t] > 0 && (
+              <span className="tab-badge">{(badges as any)[t]}</span>
+            )}
           </button>
         ))}
       </nav>
@@ -520,10 +602,13 @@ export default function App() {
                   <p className="hint">No other devices connected yet.</p>
                 ) : (
                   <ul className="device-list">
-                    {devices.map((d, i) => (
+                    {devices.map((d: any, i) => (
                       <li key={i} className="device-item">
                         <span className={`status-dot ${d.status === 'online' ? 'online' : 'offline'}`} />
-                        <span className="device-name">{d.name}</span>
+                        <div className="device-info">
+                          <span className="device-name">{d.name}</span>
+                          {d.projectPath && <span className="device-project">{d.projectPath}</span>}
+                        </div>
                         <span className="device-platform">{d.platform}</span>
                       </li>
                     ))}
@@ -537,6 +622,25 @@ export default function App() {
                     <code>{connectionInfo.addresses?.[0] || 'localhost'}:{portInput}</code>
                   </div>
                 )}
+              </div>
+            )}
+
+            {mode !== 'idle' && (
+              <div className="section">
+                <h2>Project Folder</h2>
+                <p className="hint">Select a project folder to sync files between machines. Terminal will open here.</p>
+                <div className="input-row">
+                  <input
+                    readOnly
+                    value={projectFolder || 'No folder selected'}
+                    placeholder="Select a project folder..."
+                    style={{ cursor: 'pointer', opacity: projectFolder ? 1 : 0.5 }}
+                    onClick={handleSelectFolder}
+                  />
+                  <button className="btn btn-primary" onClick={handleSelectFolder}>
+                    Browse
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -667,6 +771,94 @@ export default function App() {
                 ))
               )}
             </div>
+          </div>
+        )}
+
+        {tab === 'files' && (
+          <div className="panel">
+            <div className="section">
+              <h2>File Sync</h2>
+              {!projectFolder ? (
+                <div>
+                  <p className="hint">Select a project folder first on the Connect tab.</p>
+                  <button className="btn btn-primary" onClick={handleSelectFolder}>
+                    Select Project Folder
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <p className="hint">Project: <strong style={{ color: 'var(--accent)' }}>{projectFolder}</strong></p>
+
+                  <div className="input-row" style={{ marginTop: 16 }}>
+                    <select
+                      className="sync-select"
+                      value={syncTarget}
+                      onChange={e => setSyncTarget(e.target.value)}
+                    >
+                      <option value="">Select target device...</option>
+                      {devices.filter(d => d.status === 'online').map(d => (
+                        <option key={d.name} value={d.name}>{d.name} ({d.platform})</option>
+                      ))}
+                    </select>
+                    <button className="btn btn-primary" onClick={handlePushFiles} disabled={!syncTarget}>
+                      Push
+                    </button>
+                    <button className="btn btn-secondary" onClick={handlePullFiles} disabled={!syncTarget}>
+                      Pull
+                    </button>
+                  </div>
+
+                  {syncStatus && (
+                    <div className="sync-progress">
+                      <div className="sync-progress-header">
+                        <span className="sync-phase">{syncStatus.phase}</span>
+                        {syncStatus.currentFile && (
+                          <span className="sync-current-file">{syncStatus.currentFile}</span>
+                        )}
+                      </div>
+                      {syncStatus.totalFiles > 0 && (
+                        <div className="sync-progress-bar">
+                          <div
+                            className="sync-progress-fill"
+                            style={{ width: `${Math.round((syncStatus.completedFiles / syncStatus.totalFiles) * 100)}%` }}
+                          />
+                        </div>
+                      )}
+                      <span className="sync-count">
+                        {syncStatus.completedFiles} / {syncStatus.totalFiles} files
+                      </span>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+
+            {projectFolder && (
+              <div className="section">
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                  <h2>Local Files</h2>
+                  <button className="btn btn-small btn-secondary" onClick={handleRefreshManifest}>
+                    Refresh
+                  </button>
+                </div>
+                {fileManifest.length === 0 ? (
+                  <p className="hint">Click Refresh to scan project files.</p>
+                ) : (
+                  <div className="file-manifest">
+                    <p className="hint">{fileManifest.length} files tracked</p>
+                    {fileManifest.slice(0, 100).map((f: any, i: number) => (
+                      <div key={i} className="file-entry">
+                        <span className="file-path">{f.path}</span>
+                        <span className="file-size">{(f.size / 1024).toFixed(1)}KB</span>
+                      </div>
+                    ))}
+                    {fileManifest.length > 100 && (
+                      <p className="hint center">...and {fileManifest.length - 100} more files</p>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 

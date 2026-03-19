@@ -197,6 +197,67 @@ export class RelayServer {
         break;
       }
 
+      case 'set-project': {
+        const client = this.clients.get(clientId);
+        if (client) {
+          client.device.projectPath = msg.projectPath;
+          this.broadcast({ type: 'device-updated', device: client.device }, undefined);
+        }
+        break;
+      }
+
+      case 'file-sync-request': {
+        // Forward sync request to target device
+        if (msg.target) {
+          this.sendTo(msg.target, {
+            type: 'file-sync-request',
+            from: this.clients.get(clientId)?.device.name,
+            syncId: msg.syncId,
+            manifest: msg.manifest,
+            filePaths: msg.filePaths,
+            direction: msg.direction, // 'push' or 'pull'
+          });
+        }
+        break;
+      }
+
+      case 'file-chunk': {
+        // Route chunk to target device
+        if (msg.target) {
+          this.sendTo(msg.target, {
+            type: 'file-chunk',
+            from: this.clients.get(clientId)?.device.name,
+            chunk: msg.chunk,
+          });
+        }
+        break;
+      }
+
+      case 'file-sync-status': {
+        // Forward status update to target device
+        if (msg.target) {
+          this.sendTo(msg.target, {
+            type: 'file-sync-status',
+            from: this.clients.get(clientId)?.device.name,
+            status: msg.status,
+          });
+        }
+        break;
+      }
+
+      case 'file-manifest-response': {
+        // Forward manifest response to requesting device
+        if (msg.target) {
+          this.sendTo(msg.target, {
+            type: 'file-manifest-response',
+            from: this.clients.get(clientId)?.device.name,
+            syncId: msg.syncId,
+            manifest: msg.manifest,
+          });
+        }
+        break;
+      }
+
       case 'get-state': {
         ws.send(JSON.stringify({
           type: 'state',

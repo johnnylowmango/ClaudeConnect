@@ -11,6 +11,7 @@ const RELAY_HOST = process.env.CLAUDE_CONNECT_HOST || 'localhost';
 const RELAY_PORT = parseInt(process.env.CLAUDE_CONNECT_PORT || '3377');
 const DEVICE_NAME = process.env.CLAUDE_CONNECT_DEVICE || `claude-${process.platform}-${process.pid}`;
 const DEVICE_ROLE = process.env.CLAUDE_CONNECT_ROLE || '';
+const PROJECT_PATH = process.env.CLAUDE_CONNECT_PROJECT || '';
 
 let ws: WebSocket | null = null;
 let connected = false;
@@ -92,6 +93,9 @@ const TOOLS = [
   { name: 'cc_clipboard_share', description: 'Share content with the other session.', inputSchema: { type: 'object' as const, properties: { content: { type: 'string' }, label: { type: 'string' } }, required: ['content'] } },
   { name: 'cc_clipboard_get', description: 'Get shared content.', inputSchema: { type: 'object' as const, properties: { count: { type: 'number' } } } },
   { name: 'cc_get_devices', description: 'See connected machines.', inputSchema: { type: 'object' as const, properties: {} } },
+  { name: 'cc_push_files', description: 'Push changed files to a target device. Sends local project files that differ from the remote.', inputSchema: { type: 'object' as const, properties: { target: { type: 'string', description: 'Target device name' }, files: { type: 'array', items: { type: 'string' }, description: 'Optional specific file paths to push' } }, required: ['target'] } },
+  { name: 'cc_pull_files', description: 'Pull changed files from a target device. Requests files that differ from local.', inputSchema: { type: 'object' as const, properties: { target: { type: 'string', description: 'Target device name' } }, required: ['target'] } },
+  { name: 'cc_project_status', description: 'Compare project file manifests between this machine and a target device.', inputSchema: { type: 'object' as const, properties: { target: { type: 'string', description: 'Target device name to compare with' } }, required: ['target'] } },
 ];
 
 function handleTool(name: string, args: any): any {
@@ -131,6 +135,30 @@ function handleTool(name: string, args: any): any {
       return { clipboard: clipboard.slice(0, args.count || 10) };
     case 'cc_get_devices':
       return { devices, thisDevice: DEVICE_NAME, connected };
+    case 'cc_push_files': {
+      if (!PROJECT_PATH) return { error: 'No project folder configured. Select a project folder in the Claude Connect app first.' };
+      const syncId = `mcp-push-${Date.now()}`;
+      relaySend({ action: 'file-sync-request', target: args.target, syncId, manifest: [], direction: 'push', filePaths: args.files });
+      return { success: true, syncId, message: `Push request sent to ${args.target}. The Electron app handles the actual file transfer.` };
+    }
+    case 'cc_pull_files': {
+      if (!PROJECT_PATH) return { error: 'No project folder configured. Select a project folder in the Claude Connect app first.' };
+      const syncId = `mcp-pull-${Date.now()}`;
+      relaySend({ action: 'file-sync-request', target: args.target, syncId, manifest: [], direction: 'pull' });
+      return { success: true, syncId, message: `Pull request sent to ${args.target}. Files will be synced by the Electron app.` };
+    }
+    case 'cc_project_status': {
+      if (!PROJECT_PATH) return { error: 'No project folder configured. Select a project folder in the Claude Connect app first.' };
+      const targetDevice = devices.find((d: any) => d.name === args.target);
+      return {
+        thisDevice: DEVICE_NAME,
+        projectPath: PROJECT_PATH,
+        target: args.target,
+        targetProjectPath: targetDevice?.projectPath || 'unknown',
+        targetOnline: !!targetDevice && targetDevice.status === 'online',
+        message: 'Use cc_push_files or cc_pull_files to sync. The Electron app handles manifest comparison and file transfer.',
+      };
+    }
     default:
       return { error: `Unknown tool: ${name}` };
   }

@@ -91,6 +91,9 @@ export class RelayClient {
       case 'device-disconnected':
         this.emit('device-disconnected', msg.device);
         break;
+      case 'device-updated':
+        this.emit('device-updated', msg.device);
+        break;
       case 'task-update':
         this.emit('task-update', msg.task);
         break;
@@ -99,6 +102,18 @@ export class RelayClient {
         break;
       case 'state':
         this.emit('state', msg);
+        break;
+      case 'file-sync-request':
+        this.emit('file-sync-request', msg);
+        break;
+      case 'file-chunk':
+        this.emit('file-chunk', msg);
+        break;
+      case 'file-sync-status':
+        this.emit('file-sync-status', msg);
+        break;
+      case 'file-manifest-response':
+        this.emit('file-manifest-response', msg);
         break;
     }
   }
@@ -125,6 +140,26 @@ export class RelayClient {
 
   requestState() {
     this.send({ action: 'get-state' });
+  }
+
+  setProject(projectPath: string) {
+    this.send({ action: 'set-project', projectPath });
+  }
+
+  requestFileSync(target: string, syncId: string, manifest: any[], direction: 'push' | 'pull', filePaths?: string[]) {
+    this.send({ action: 'file-sync-request', target, syncId, manifest, direction, filePaths });
+  }
+
+  sendFileChunk(target: string, chunk: any) {
+    this.send({ action: 'file-chunk', target, chunk });
+  }
+
+  reportFileSyncStatus(target: string, status: any) {
+    this.send({ action: 'file-sync-status', target, status });
+  }
+
+  sendManifestResponse(target: string, syncId: string, manifest: any[]) {
+    this.send({ action: 'file-manifest-response', target, syncId, manifest });
   }
 
   private send(data: any) {

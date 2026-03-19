@@ -1,10 +1,12 @@
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import { RelayServer } from '../server/relay';
 import { RelayClient } from '../server/client';
 import { DEFAULT_PORT } from '../shared/types';
 import * as os from 'os';
+import { buildManifest, readFileChunked, receiveChunk, diffManifests } from './file-sync';
+import { v4 as uuid } from 'uuid';
 
 // node-pty is a native module — require it dynamically
 let pty: any;
@@ -18,6 +20,7 @@ let mainWindow: BrowserWindow | null = null;
 let server: RelayServer | null = null;
 let client: RelayClient | null = null;
 let mcpInstalled = false;
+let projectPath: string | null = null;
 
 // Track active terminal processes
 const terminals: Map<number, any> = new Map();
@@ -79,6 +82,7 @@ function installMcpConfig(deviceName: string, role: string, host: string) {
         CLAUDE_CONNECT_ROLE: role || '',
         CLAUDE_CONNECT_HOST: host || 'localhost',
         CLAUDE_CONNECT_PORT: String(DEFAULT_PORT),
+        ...(projectPath ? { CLAUDE_CONNECT_PROJECT: projectPath } : {}),
       },
     };
 
@@ -271,7 +275,7 @@ ipcMain.handle('terminal-create', async (_, cwd?: string) => {
     name: 'xterm-256color',
     cols: 120,
     rows: 30,
-    cwd: cwd || os.homedir(),
+    cwd: cwd || projectPath || os.homedir(),
     env,
   });
 
@@ -317,6 +321,88 @@ ipcMain.handle('terminal-kill', async (_, id: number) => {
   return { success: false, error: 'Terminal not found' };
 });
 
+// --- File sync event handling ---
+
+function handleFileSyncEvent(event: string, data: any) {
+  if (!projectPath || !client) return;
+
+  switch (event) {
+    case 'file-sync-request': {
+      // Another device wants to sync with us
+      if (data.direction === 'push' && data.filePaths) {
+        // They will push files to us — nothing to do, chunks will arrive
+        mainWindow?.webContents.send('file-sync-progress', {
+          syncId: data.syncId, phase: 'transferring',
+          totalFiles: data.filePaths?.length || 0, completedFiles: 0,
+        });
+      } else if (data.direction === 'pull') {
+        // They want our files — compare manifests and send diffs
+        const localManifest = buildManifest(projectPath);
+        const remoteManifest = data.manifest || [];
+        const { toPush } = diffManifests(localManifest, remoteManifest);
+
+        let completed = 0;
+        for (const filePath of toPush) {
+          const chunks = readFileChunked(projectPath, filePath, data.syncId);
+          for (const chunk of chunks) {
+            client.sendFileChunk(data.from, chunk);
+          }
+          completed++;
+        }
+        client.reportFileSyncStatus(data.from, {
+          syncId: data.syncId, phase: 'done',
+          totalFiles: toPush.length, completedFiles: toPush.length,
+        });
+      } else if (data.direction === 'push' && !data.filePaths) {
+        // They sent their manifest for comparison — send ours back
+        const localManifest = buildManifest(projectPath);
+        client.sendManifestResponse(data.from, data.syncId, localManifest);
+      }
+      break;
+    }
+
+    case 'file-chunk': {
+      // Incoming file chunk — reassemble
+      const done = receiveChunk(projectPath, data.chunk);
+      if (done) {
+        mainWindow?.webContents.send('file-sync-progress', {
+          syncId: data.chunk.syncId,
+          phase: 'writing',
+          currentFile: data.chunk.filePath,
+          completedFiles: 1,
+          totalFiles: 1,
+        });
+      }
+      break;
+    }
+
+    case 'file-sync-status': {
+      mainWindow?.webContents.send('file-sync-progress', data.status);
+      break;
+    }
+
+    case 'file-manifest-response': {
+      // Got remote manifest — compute diff and report
+      const localManifest = buildManifest(projectPath);
+      const diff = diffManifests(localManifest, data.manifest || []);
+      mainWindow?.webContents.send('file-manifest-diff', {
+        syncId: data.syncId,
+        from: data.from,
+        toPush: diff.toPush,
+        toPull: diff.toPull,
+      });
+      break;
+    }
+  }
+}
+
+function setupClientEventHandler(c: RelayClient) {
+  c.setEventHandler((event, data) => {
+    mainWindow?.webContents.send('client-event', { event, data });
+    handleFileSyncEvent(event, data);
+  });
+}
+
 // --- Connection IPC ---
 
 ipcMain.handle('start-server', async (_, port?: number, deviceName?: string, role?: string) => {
@@ -328,9 +414,7 @@ ipcMain.handle('start-server', async (_, port?: number, deviceName?: string, rol
     await server.start();
 
     client = new RelayClient(deviceName || os.hostname(), process.platform);
-    client.setEventHandler((event, data) => {
-      mainWindow?.webContents.send('client-event', { event, data });
-    });
+    setupClientEventHandler(client);
     await client.connect('localhost', port || DEFAULT_PORT);
 
     installMcpConfig(deviceName || os.hostname(), role || 'host', 'localhost');
@@ -353,9 +437,7 @@ ipcMain.handle('stop-server', async () => {
 ipcMain.handle('connect-to-server', async (_, host: string, port: number, deviceName?: string, role?: string) => {
   try {
     client = new RelayClient(deviceName || os.hostname(), process.platform);
-    client.setEventHandler((event, data) => {
-      mainWindow?.webContents.send('client-event', { event, data });
-    });
+    setupClientEventHandler(client);
     await client.connect(host, port);
 
     installMcpConfig(deviceName || os.hostname(), role || 'client', host);
@@ -418,4 +500,103 @@ ipcMain.handle('get-connection-info', async () => {
     isConnected: client?.isConnected() || false,
     mcpInstalled,
   };
+});
+
+// --- Project Folder IPC ---
+
+ipcMain.handle('select-project-folder', async () => {
+  if (!mainWindow) return { success: false, error: 'No window' };
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory'],
+    title: 'Select Project Folder',
+  });
+  if (result.canceled || !result.filePaths[0]) {
+    return { success: false };
+  }
+  projectPath = result.filePaths[0];
+  client?.setProject(projectPath);
+  return { success: true, path: projectPath };
+});
+
+ipcMain.handle('get-project-folder', async () => {
+  return { path: projectPath };
+});
+
+ipcMain.handle('set-project-folder', async (_, folderPath: string) => {
+  projectPath = folderPath;
+  client?.setProject(projectPath);
+  return { success: true, path: projectPath };
+});
+
+// --- File Sync IPC ---
+
+ipcMain.handle('get-file-manifest', async () => {
+  if (!projectPath) return { success: false, error: 'No project folder selected' };
+  try {
+    const manifest = buildManifest(projectPath);
+    return { success: true, manifest };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('push-files', async (_, target: string, filePaths?: string[]) => {
+  if (!projectPath || !client) return { success: false, error: 'Not ready' };
+  try {
+    const syncId = uuid();
+    const manifest = buildManifest(projectPath);
+
+    // Send sync request with our manifest
+    client.requestFileSync(target, syncId, manifest, 'push', filePaths);
+
+    // If specific files requested, send them now
+    if (filePaths && filePaths.length > 0) {
+      let completed = 0;
+      for (const filePath of filePaths) {
+        const chunks = readFileChunked(projectPath, filePath, syncId);
+        for (const chunk of chunks) {
+          client.sendFileChunk(target, chunk);
+        }
+        completed++;
+        mainWindow?.webContents.send('file-sync-progress', {
+          syncId, phase: 'transferring',
+          totalFiles: filePaths.length, completedFiles: completed,
+          currentFile: filePath,
+        });
+      }
+      mainWindow?.webContents.send('file-sync-progress', {
+        syncId, phase: 'done',
+        totalFiles: filePaths.length, completedFiles: filePaths.length,
+      });
+    }
+
+    return { success: true, syncId };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('pull-files', async (_, target: string) => {
+  if (!projectPath || !client) return { success: false, error: 'Not ready' };
+  try {
+    const syncId = uuid();
+    const manifest = buildManifest(projectPath);
+    client.requestFileSync(target, syncId, manifest, 'pull');
+    return { success: true, syncId };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('compare-manifests', async (_, target: string) => {
+  if (!projectPath || !client) return { success: false, error: 'Not ready' };
+  try {
+    const syncId = uuid();
+    const manifest = buildManifest(projectPath);
+    // Request remote manifest for comparison
+    client.requestFileSync(target, syncId, manifest, 'push');
+    return { success: true, syncId, localManifest: manifest };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
 });
