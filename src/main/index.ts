@@ -29,6 +29,64 @@ let lastMcpHost: string = '';
 const terminals: Map<number, any> = new Map();
 let nextTerminalId = 1;
 
+// Command Center: terminal binding + injection queue
+const deviceToTerminal: Map<string, number> = new Map();  // deviceName → terminalId
+const terminalIdleTimers: Map<number, NodeJS.Timeout> = new Map();
+const terminalIdle: Map<number, boolean> = new Map();  // terminalId → isIdle
+const injectionQueue: Map<number, Array<{ text: string; promptId: string }>> = new Map();
+const terminalOutputBuffers: Map<number, string> = new Map();  // for response capture
+const IDLE_TIMEOUT_MS = 2000;
+
+function markTerminalBusy(termId: number) {
+  terminalIdle.set(termId, false);
+  const existing = terminalIdleTimers.get(termId);
+  if (existing) clearTimeout(existing);
+  terminalIdleTimers.set(termId, setTimeout(() => {
+    terminalIdle.set(termId, true);
+    processInjectionQueue(termId);
+  }, IDLE_TIMEOUT_MS));
+}
+
+function processInjectionQueue(termId: number) {
+  if (!terminalIdle.get(termId)) return;
+  const queue = injectionQueue.get(termId);
+  if (!queue || queue.length === 0) return;
+
+  const next = queue.shift()!;
+  const term = terminals.get(termId);
+  if (!term) return;
+
+  terminalIdle.set(termId, false);
+  term.write(next.text + '\n');
+
+  // Notify renderer that injection happened
+  mainWindow?.webContents.send('command-injected', {
+    termId, promptId: next.promptId, text: next.text,
+  });
+}
+
+function injectIntoTerminal(termId: number, text: string, promptId: string) {
+  const idle = terminalIdle.get(termId);
+  if (idle) {
+    // Inject immediately
+    const term = terminals.get(termId);
+    if (!term) return;
+    terminalIdle.set(termId, false);
+    term.write(text + '\n');
+    mainWindow?.webContents.send('command-injected', {
+      termId, promptId, text,
+    });
+  } else {
+    // Queue it
+    if (!injectionQueue.has(termId)) injectionQueue.set(termId, []);
+    injectionQueue.get(termId)!.push({ text, promptId });
+  }
+}
+
+function stripAnsi(text: string): string {
+  return text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
+}
+
 // --- MCP auto-config ---
 
 function getClaudeConfigPath(): string {
@@ -291,11 +349,33 @@ ipcMain.handle('terminal-create', async (_, cwd?: string) => {
 
   term.onData((data: string) => {
     mainWindow?.webContents.send('terminal-data', { id, data });
+    // Track idle state for injection queue
+    markTerminalBusy(id);
+    // Buffer output for Command Center response streaming
+    const existing = terminalOutputBuffers.get(id) || '';
+    terminalOutputBuffers.set(id, existing + data);
+    // Send stripped output to Command Center
+    const stripped = stripAnsi(data);
+    if (stripped.trim()) {
+      mainWindow?.webContents.send('command-terminal-output', {
+        termId: id, text: stripped,
+      });
+    }
   });
 
   term.onExit(({ exitCode }: { exitCode: number }) => {
     mainWindow?.webContents.send('terminal-exit', { id, exitCode });
     terminals.delete(id);
+    terminalIdle.delete(id);
+    terminalOutputBuffers.delete(id);
+    injectionQueue.delete(id);
+    const timer = terminalIdleTimers.get(id);
+    if (timer) clearTimeout(timer);
+    terminalIdleTimers.delete(id);
+    // Remove from deviceToTerminal
+    for (const [dev, tid] of deviceToTerminal) {
+      if (tid === id) { deviceToTerminal.delete(dev); break; }
+    }
   });
 
   return { success: true, id };
@@ -327,6 +407,44 @@ ipcMain.handle('terminal-kill', async (_, id: number) => {
     return { success: true };
   }
   return { success: false, error: 'Terminal not found' };
+});
+
+// --- Command Center IPC ---
+
+ipcMain.handle('bind-terminal-device', async (_, terminalId: number, devName: string) => {
+  deviceToTerminal.set(devName, terminalId);
+  terminalIdle.set(terminalId, true);  // assume idle initially
+  return { success: true };
+});
+
+ipcMain.handle('inject-prompt', async (_, terminalId: number, text: string, promptId: string) => {
+  const term = terminals.get(terminalId);
+  if (!term) return { success: false, error: 'Terminal not found' };
+  injectIntoTerminal(terminalId, text, promptId);
+  return { success: true };
+});
+
+ipcMain.handle('inject-prompt-to-device', async (_, deviceName: string, text: string, promptId: string) => {
+  const termId = deviceToTerminal.get(deviceName);
+  if (termId === undefined) return { success: false, error: `No terminal bound to device: ${deviceName}` };
+  const term = terminals.get(termId);
+  if (!term) return { success: false, error: 'Terminal not found' };
+  injectIntoTerminal(termId, text, promptId);
+  return { success: true };
+});
+
+ipcMain.handle('send-prompt-inject', async (_, target: string, text: string, promptId: string) => {
+  if (!client) return { success: false, error: 'Not connected' };
+  client.sendPromptInject(target, text, promptId);
+  return { success: true };
+});
+
+ipcMain.handle('get-bound-terminals', async () => {
+  const bindings: Array<{ deviceName: string; terminalId: number }> = [];
+  for (const [dev, tid] of deviceToTerminal) {
+    bindings.push({ deviceName: dev, terminalId: tid });
+  }
+  return bindings;
 });
 
 // --- File sync event handling ---
@@ -497,6 +615,56 @@ function setupClientEventHandler(c: RelayClient) {
         content: `NEW TASK: "${data.title}"${data.assignedTo ? ` (assigned to ${data.assignedTo})` : ''}${data.notes ? ` — ${data.notes}` : ''}`,
       });
     }
+
+    // Auto-inject incoming messages into local Claude terminal (Command Center feature)
+    if (event === 'message' && data.from !== lastMcpDevice) {
+      const content = data.payload?.text || data.payload?.summary || '';
+      if (content) {
+        const localTermId = deviceToTerminal.get(lastMcpDevice);
+        if (localTermId !== undefined && terminals.has(localTermId)) {
+          const injectionText = `[${data.from} says]: ${content}`;
+          injectIntoTerminal(localTermId, injectionText, `auto-${data.id || Date.now()}`);
+          mainWindow?.webContents.send('command-event', {
+            id: `evt-${Date.now()}`,
+            type: 'info',
+            text: `Auto-injected message from ${data.from}`,
+            timestamp: Date.now(),
+          });
+        }
+      }
+    }
+
+    // Auto-pull files when a work-update arrives with filesChanged
+    if (event === 'message' && data.type === 'work-update' && data.from !== lastMcpDevice) {
+      const filesChanged = data.payload?.filesChanged;
+      if (filesChanged && filesChanged.length > 0 && projectPath && client) {
+        const syncId = uuid();
+        const { buildManifest: bm } = require('./file-sync');
+        const manifest = bm(projectPath);
+        client.requestFileSync(data.from, syncId, manifest, 'pull');
+        mainWindow?.webContents.send('command-event', {
+          id: `evt-${Date.now()}`,
+          type: 'sync',
+          text: `Auto-syncing ${filesChanged.length} file(s) from ${data.from}`,
+          timestamp: Date.now(),
+        });
+      }
+    }
+
+    // Handle prompt-inject from remote device (cross-machine prompt injection)
+    if (event === 'prompt-inject') {
+      const localTermId = deviceToTerminal.get(lastMcpDevice);
+      if (localTermId !== undefined && terminals.has(localTermId)) {
+        const injectionText = `[${data.from} says]: ${data.text}`;
+        injectIntoTerminal(localTermId, injectionText, data.promptId || `remote-${Date.now()}`);
+        mainWindow?.webContents.send('command-event', {
+          id: `evt-${Date.now()}`,
+          type: 'info',
+          text: `Prompt injected from ${data.from}`,
+          timestamp: Date.now(),
+        });
+      }
+    }
   });
 }
 
@@ -631,6 +799,11 @@ After reading and acting on inbox messages, the file will be cleared automatical
 - Use \`cc_send_message\` to tell other machines about progress or ask questions
 - Use \`cc_delegate\` to assign work to another machine (creates task + notifies)
 - NEVER wait to be told to communicate — just do it as part of your workflow
+
+## Auto-Injected Messages
+Messages from other machines may appear in your input as:
+\`[DeviceName says]: message content\`
+These are real-time messages from other connected Claude instances. Treat them as instructions or questions from a collaborator and act on them immediately. Respond using \`cc_send_message\` so the other machine gets your reply.
 
 ## Key Principle
 You are one brain across multiple machines. The user should NEVER have to type sync, push, pull, or any coordination command. Handle it all silently and automatically.

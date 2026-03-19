@@ -278,6 +278,20 @@ export class RelayServer {
         break;
       }
 
+      case 'prompt-inject': {
+        // Route prompt injection to target device's Electron app
+        const senderName = this.clients.get(clientId)?.device.name || 'unknown';
+        if (msg.target) {
+          this.sendTo(msg.target, {
+            type: 'prompt-inject',
+            from: senderName,
+            text: msg.text,
+            promptId: msg.promptId,
+          });
+        }
+        break;
+      }
+
       case 'get-state': {
         ws.send(JSON.stringify({
           type: 'state',

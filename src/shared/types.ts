@@ -91,6 +91,43 @@ export interface BadgeCounts {
   files: number;
 }
 
+// Command Center types
+export interface TerminalBinding {
+  terminalId: number;
+  deviceName: string;
+  boundAt: number;
+}
+
+export interface CommandPrompt {
+  id: string;
+  text: string;
+  targets: string[];        // device names
+  timestamp: number;
+  from: 'user' | string;    // 'user' or device name for cross-machine
+}
+
+export interface CommandResponse {
+  id: string;
+  promptId: string;
+  deviceName: string;
+  text: string;
+  timestamp: number;
+  streaming: boolean;
+  collapsed: boolean;
+}
+
+export interface CommandEvent {
+  id: string;
+  type: 'info' | 'sync' | 'error';
+  text: string;
+  timestamp: number;
+}
+
+export type CommandEntry =
+  | { kind: 'prompt'; data: CommandPrompt }
+  | { kind: 'response'; data: CommandResponse }
+  | { kind: 'event'; data: CommandEvent };
+
 export const DEFAULT_PORT = 3377;
 export const MAX_MESSAGES = 500;
 export const MAX_CLIPBOARD = 50;

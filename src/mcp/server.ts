@@ -94,6 +94,9 @@ function handleRelayMessage(msg: any) {
       tasks = msg.tasks || []; clipboard = msg.clipboard || [];
       updateProjectPathFromDevices();
       break;
+    case 'prompt-inject':
+      // Prompt injections are handled by the Electron app's PTY, not here
+      break;
   }
 }
 

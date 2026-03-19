@@ -118,6 +118,9 @@ export class RelayClient {
       case 'mcp-trigger-sync':
         this.emit('mcp-trigger-sync', msg);
         break;
+      case 'prompt-inject':
+        this.emit('prompt-inject', msg);
+        break;
     }
   }
 
@@ -163,6 +166,10 @@ export class RelayClient {
 
   sendManifestResponse(target: string, syncId: string, manifest: any[]) {
     this.send({ action: 'file-manifest-response', target, syncId, manifest });
+  }
+
+  sendPromptInject(target: string, text: string, promptId: string) {
+    this.send({ action: 'prompt-inject', target, text, promptId });
   }
 
   private send(data: any) {
