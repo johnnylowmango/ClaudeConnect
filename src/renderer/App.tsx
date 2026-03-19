@@ -90,7 +90,24 @@ export default function App() {
           setClipboard(data.clipboard || []);
           break;
         case 'message':
-          setMessages(prev => [...prev, data]);
+          setMessages(prev => {
+            // Skip if we already added this optimistically (same sender + same text within 5s)
+            const dominated = prev.some(m =>
+              m.id.startsWith('local-') &&
+              m.payload?.text === data.payload?.text &&
+              Math.abs(m.timestamp - data.timestamp) < 5000
+            );
+            if (dominated) {
+              // Replace the optimistic message with the real one
+              return prev.map(m =>
+                m.id.startsWith('local-') &&
+                m.payload?.text === data.payload?.text &&
+                Math.abs(m.timestamp - data.timestamp) < 5000
+                  ? data : m
+              );
+            }
+            return [...prev, data];
+          });
           break;
         case 'device-connected':
           setDevices(prev => [...prev.filter(d => d.name !== data.name), data]);
@@ -186,12 +203,18 @@ export default function App() {
       const fitAddon = new FitAddon();
       fitAddonRef.current = fitAddon;
 
+      const isWin = navigator.platform.startsWith('Win');
       const term = new Terminal({
-        fontFamily: "'SF Mono', 'Fira Code', 'Cascadia Code', monospace",
-        fontSize: 13,
-        lineHeight: 1.4,
+        fontFamily: isWin
+          ? "'Cascadia Code', 'Consolas', 'Courier New', monospace"
+          : "'SF Mono', 'Fira Code', 'Cascadia Code', monospace",
+        fontSize: isWin ? 14 : 13,
+        lineHeight: isWin ? 1.3 : 1.4,
         cursorBlink: true,
         cursorStyle: 'bar',
+        scrollback: 5000,
+        allowTransparency: false,
+        windowsMode: isWin,
         theme: {
           background: '#08090c',
           foreground: '#e8e9ed',
@@ -317,7 +340,7 @@ export default function App() {
     if (result.success) {
       setMode('hosting');
       setStatus(`Hosting on port ${port}`);
-      setTab('messages');
+      setTab('terminal');
     } else {
       setStatus(`Error: ${result.error}`);
     }
@@ -330,7 +353,7 @@ export default function App() {
     if (result.success) {
       setMode('connected');
       setStatus(`Connected to ${hostInput}:${port}`);
-      setTab('messages');
+      setTab('terminal');
     } else {
       setStatus(`Error: ${result.error}`);
     }
@@ -349,9 +372,18 @@ export default function App() {
   };
 
   const handleSendMessage = async () => {
-    if (!messageInput.trim()) return;
-    await ipcRenderer.invoke('send-message', messageInput);
+    if (!messageInput.trim() || mode === 'idle') return;
+    const text = messageInput;
     setMessageInput('');
+    // Optimistic: show locally right away
+    setMessages(prev => [...prev, {
+      id: `local-${Date.now()}`,
+      type: 'chat',
+      from: deviceName || connectionInfo?.hostname || 'You',
+      timestamp: Date.now(),
+      payload: { text },
+    }]);
+    await ipcRenderer.invoke('send-message', text);
   };
 
   const handleCreateTask = async () => {

@@ -244,23 +244,35 @@ ipcMain.handle('terminal-create', async (_, cwd?: string) => {
   }
 
   const id = nextTerminalId++;
-  const shell = process.platform === 'win32' ? 'powershell.exe' : (process.env.SHELL || '/bin/zsh');
+  const isWin = process.platform === 'win32';
+  const shell = isWin ? 'powershell.exe' : (process.env.SHELL || '/bin/zsh');
 
-  // Build a proper PATH that includes common locations for node/claude
-  const extraPaths = [
-    path.join(os.homedir(), '.local', 'bin'),
-    '/opt/homebrew/bin',
-    '/usr/local/bin',
-  ];
-  const currentPath = process.env.PATH || '';
-  const fullPath = [...extraPaths, ...currentPath.split(':')].filter(Boolean).join(':');
+  // Build env with proper PATH for both platforms
+  const env: Record<string, string> = { ...process.env } as any;
+  if (isWin) {
+    // Windows: ensure common paths for node/claude are available
+    const extraPaths = [
+      path.join(os.homedir(), 'AppData', 'Roaming', 'npm'),
+      path.join(os.homedir(), '.local', 'bin'),
+      path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'nodejs'),
+    ];
+    env.PATH = [...extraPaths, env.PATH || ''].filter(Boolean).join(';');
+  } else {
+    const extraPaths = [
+      path.join(os.homedir(), '.local', 'bin'),
+      '/opt/homebrew/bin',
+      '/usr/local/bin',
+    ];
+    env.PATH = [...extraPaths, ...(env.PATH || '').split(':')].filter(Boolean).join(':');
+    env.TERM = 'xterm-256color';
+  }
 
-  const term = pty.spawn(shell, process.platform === 'win32' ? [] : ['-l'], {
+  const term = pty.spawn(shell, isWin ? ['-NoLogo'] : ['-l'], {
     name: 'xterm-256color',
     cols: 120,
     rows: 30,
     cwd: cwd || os.homedir(),
-    env: { ...process.env, TERM: 'xterm-256color', PATH: fullPath },
+    env,
   });
 
   terminals.set(id, term);
