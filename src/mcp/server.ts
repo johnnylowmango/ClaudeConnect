@@ -6,6 +6,8 @@
  */
 
 // Zero external dependencies — uses Node's built-in WebSocket (Node 21+)
+const fs = require('fs');
+const nodePath = require('path');
 
 const RELAY_HOST = process.env.CLAUDE_CONNECT_HOST || 'localhost';
 const RELAY_PORT = parseInt(process.env.CLAUDE_CONNECT_PORT || '3377');
@@ -133,19 +135,30 @@ const TOOLS = [
   { name: 'cc_push_files', description: 'CALL AUTOMATICALLY after creating or modifying files to push them to connected devices. Keeps project folders in sync.', inputSchema: { type: 'object' as const, properties: { target: { type: 'string', description: 'Target device name' }, files: { type: 'array', items: { type: 'string' }, description: 'Specific file paths to push (relative to project). Omit to push all changed files.' } }, required: ['target'] } },
   { name: 'cc_pull_files', description: 'Pull files from a target device. Call when the other machine has made changes you need.', inputSchema: { type: 'object' as const, properties: { target: { type: 'string', description: 'Target device name' } }, required: ['target'] } },
   { name: 'cc_project_status', description: 'Compare file manifests between machines to see what differs.', inputSchema: { type: 'object' as const, properties: { target: { type: 'string', description: 'Target device name to compare with' } }, required: ['target'] } },
+  { name: 'cc_check_inbox', description: 'Read and clear the message inbox. Contains real-time messages and tasks from other machines. Call this to see what other devices have sent you.', inputSchema: { type: 'object' as const, properties: {} } },
 ];
 
 function handleTool(name: string, args: any): any {
   switch (name) {
-    case 'cc_sync': return {
-      thisDevice: DEVICE_NAME, role: DEVICE_ROLE || 'not set', connected,
-      projectPath: projectPath || 'not set — select a project folder in the Claude Connect app',
-      connectedDevices: devices,
-      recentActivityFromOthers: conversationLog.filter((m: any) => m.from !== DEVICE_NAME).slice(-30)
-        .map((m: any) => ({ from: m.from, time: new Date(m.timestamp).toLocaleTimeString(), type: m.type, content: m.payload?.summary || m.payload?.text || m.payload })),
-      tasksForYou: tasks.filter((t: any) => (t.assignedTo === DEVICE_NAME || !t.assignedTo) && t.status !== 'done'),
-      sharedClipboard: clipboard.slice(0, 5),
-    };
+    case 'cc_sync': {
+      // Also drain inbox file if it exists
+      let inbox = '';
+      if (projectPath) {
+        const inboxPath = nodePath.join(projectPath, '.claude-connect-inbox');
+        try { inbox = fs.readFileSync(inboxPath, 'utf8').trim(); } catch {}
+        if (inbox) { try { fs.writeFileSync(inboxPath, ''); } catch {} }
+      }
+      return {
+        thisDevice: DEVICE_NAME, role: DEVICE_ROLE || 'not set', connected,
+        projectPath: projectPath || 'not set — select a project folder in the Claude Connect app',
+        connectedDevices: devices,
+        ...(inbox ? { inbox } : {}),
+        recentActivityFromOthers: conversationLog.filter((m: any) => m.from !== DEVICE_NAME).slice(-30)
+          .map((m: any) => ({ from: m.from, time: new Date(m.timestamp).toLocaleTimeString(), type: m.type, content: m.payload?.summary || m.payload?.text || m.payload })),
+        tasksForYou: tasks.filter((t: any) => (t.assignedTo === DEVICE_NAME || !t.assignedTo) && t.status !== 'done'),
+        sharedClipboard: clipboard.slice(0, 5),
+      };
+    }
     case 'cc_work_update':
       relaySend({ action: 'message', msgType: 'work-update', payload: { summary: args.summary, filesChanged: args.filesChanged || [], nextSteps: args.nextSteps } });
       return { success: true };
@@ -198,6 +211,18 @@ function handleTool(name: string, args: any): any {
         targetOnline: !!targetDevice && targetDevice.status === 'online',
         message: 'Use cc_push_files or cc_pull_files to sync. The Electron app handles manifest comparison and file transfer.',
       };
+    }
+    case 'cc_check_inbox': {
+      if (!projectPath) return { inbox: '', message: 'No project folder set.' };
+      const inboxPath = nodePath.join(projectPath, '.claude-connect-inbox');
+      let content = '';
+      try { content = fs.readFileSync(inboxPath, 'utf8').trim(); } catch {}
+      if (content) {
+        // Clear after reading
+        try { fs.writeFileSync(inboxPath, ''); } catch {}
+        return { inbox: content };
+      }
+      return { inbox: '', message: 'No new messages.' };
     }
     default:
       return { error: `Unknown tool: ${name}` };

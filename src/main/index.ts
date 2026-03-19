@@ -438,18 +438,35 @@ function handleFileSyncEvent(event: string, data: any) {
 }
 
 function notifyTerminal(from: string, type: string, content: string) {
-  // Write a visible notification to the active terminal so the user sees incoming messages
-  // Find the most recently created terminal
   const termIds = Array.from(terminals.keys());
   if (termIds.length === 0) return;
   const latestId = termIds[termIds.length - 1];
   const term = terminals.get(latestId);
   if (!term) return;
 
-  // ANSI: save cursor, move to new line, print notification, restore
   const truncated = content.length > 120 ? content.slice(0, 117) + '...' : content;
   const notification = `\r\n\x1b[38;2;124;138;255m[Claude Connect]\x1b[0m \x1b[38;2;74;158;107m${from}\x1b[0m (${type}): ${truncated}\r\n`;
   mainWindow?.webContents.send('terminal-data', { id: latestId, data: notification });
+}
+
+// --- Inbox file — write incoming messages/tasks so Claude reads them as project context ---
+
+function writeToInbox(entry: { from: string; type: string; time: string; content: string }) {
+  if (!projectPath) return;
+  const inboxPath = path.join(projectPath, '.claude-connect-inbox');
+
+  let existing = '';
+  try { existing = fs.readFileSync(inboxPath, 'utf8'); } catch {}
+
+  const line = `[${entry.time}] ${entry.from} (${entry.type}): ${entry.content}`;
+  const updated = existing ? existing.trimEnd() + '\n' + line + '\n' : line + '\n';
+  try { fs.writeFileSync(inboxPath, updated); } catch {}
+}
+
+function clearInbox() {
+  if (!projectPath) return;
+  const inboxPath = path.join(projectPath, '.claude-connect-inbox');
+  try { fs.writeFileSync(inboxPath, ''); } catch {}
 }
 
 function setupClientEventHandler(c: RelayClient) {
@@ -457,12 +474,28 @@ function setupClientEventHandler(c: RelayClient) {
     mainWindow?.webContents.send('client-event', { event, data });
     handleFileSyncEvent(event, data);
 
-    // Terminal notification for incoming messages from other devices
+    // Incoming message from another device → write to inbox + terminal notification
     if (event === 'message' && data.from !== lastMcpDevice) {
       const content = data.payload?.text || data.payload?.summary || '';
       if (content) {
         notifyTerminal(data.from, data.type, content);
+        writeToInbox({
+          from: data.from,
+          type: data.type,
+          time: new Date(data.timestamp).toLocaleTimeString(),
+          content,
+        });
       }
+    }
+
+    // Incoming task → write to inbox
+    if (event === 'task-update' && data.createdBy !== lastMcpDevice && data.status === 'pending') {
+      writeToInbox({
+        from: data.createdBy,
+        type: 'task',
+        time: new Date(data.createdAt).toLocaleTimeString(),
+        content: `NEW TASK: "${data.title}"${data.assignedTo ? ` (assigned to ${data.assignedTo})` : ''}${data.notes ? ` — ${data.notes}` : ''}`,
+      });
     }
   });
 }
@@ -579,27 +612,28 @@ function writeProjectClaudeMd(folder: string) {
   const content = `<!-- claude-connect-auto -->
 # Claude Connect — Cross-Machine Collaboration
 
-You are connected to other machines via Claude Connect. Follow these rules automatically:
+This project is shared across machines via Claude Connect. You MUST follow these rules.
 
-## On Every Conversation Start
-- Call \`cc_sync\` immediately (before doing anything else) to check for messages, tasks, and context from other machines.
-- If there are pending tasks assigned to you, start working on them.
-- If there are unread messages, acknowledge and act on them.
+## CRITICAL: Check Inbox FIRST
+Before responding to ANY user message, read the file \`.claude-connect-inbox\` in this directory.
+It contains real-time messages, tasks, and instructions from other connected machines.
+If it has content, act on it immediately. This is how the other machine talks to you.
+After reading and acting on inbox messages, the file will be cleared automatically.
 
-## After Making File Changes
-- Call \`cc_push_files\` to push your changes to connected devices so they stay in sync.
-- Call \`cc_work_update\` with a summary of what you did.
-
-## When You Need Files From Another Machine
-- Call \`cc_pull_files\` to get the latest from the other device.
+## Automatic Behavior (do ALL of this without being asked)
+1. **Start of conversation**: Call \`cc_sync\` once to get full state, then check \`.claude-connect-inbox\`
+2. **After writing/editing any file**: Call \`cc_push_files\` to sync changes to connected devices
+3. **After completing work**: Call \`cc_work_update\` with summary + files changed
+4. **After finishing a task**: Call \`cc_complete_task\` and \`cc_send_message\` to notify the other machine
+5. **When you need remote files**: Call \`cc_pull_files\` to get them
 
 ## Communication
-- When you finish a task or have a question, use \`cc_send_message\` to tell the other machine.
-- When delegating work, use \`cc_delegate\` — it creates a task AND notifies the target.
-- You do NOT need to be told to sync or communicate. Do it proactively as part of your normal workflow.
+- Use \`cc_send_message\` to tell other machines about progress or ask questions
+- Use \`cc_delegate\` to assign work to another machine (creates task + notifies)
+- NEVER wait to be told to communicate — just do it as part of your workflow
 
 ## Key Principle
-Act as one unified brain across machines. Sync automatically, push changes after edits, pull when you need context. The user should never have to tell you to sync — just do it.
+You are one brain across multiple machines. The user should NEVER have to type sync, push, pull, or any coordination command. Handle it all silently and automatically.
 `;
 
   fs.writeFileSync(claudeMdPath, content);
@@ -633,6 +667,11 @@ ipcMain.handle('select-project-folder', async () => {
 
 ipcMain.handle('get-project-folder', async () => {
   return { path: projectPath };
+});
+
+ipcMain.handle('clear-inbox', async () => {
+  clearInbox();
+  return { success: true };
 });
 
 ipcMain.handle('set-project-folder', async (_, folderPath: string) => {

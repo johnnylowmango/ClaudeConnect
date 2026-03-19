@@ -102,5 +102,6 @@ export const IGNORE_PATTERNS = [
   '.cache', '.parcel-cache', 'coverage', '.nyc_output',
   '__pycache__', '.pytest_cache', 'venv', '.venv', 'env',
   '.DS_Store', 'Thumbs.db', '.env', '.env.local',
+  '.claude-connect-inbox',
   '*.log', '*.lock', '*.tgz', '*.map',
 ];
