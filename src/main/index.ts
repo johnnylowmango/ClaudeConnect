@@ -31,7 +31,8 @@ function getClaudeConfigPath(): string {
 
 function getMcpServerPath(): string {
   if (app.isPackaged) {
-    return path.join(process.resourcesPath, 'app', 'dist', 'mcp', 'server.js');
+    // MCP server is unpacked from asar so plain `node` can run it
+    return path.join(process.resourcesPath, 'app.asar.unpacked', 'dist', 'mcp', 'server.js');
   }
   return path.join(__dirname, '..', 'mcp', 'server.js');
 }

@@ -28,6 +28,9 @@
       "dist/**/*",
       "node_modules/**/*"
     ],
+    "asarUnpack": [
+      "dist/mcp/**/*"
+    ],
     "publish": {
       "provider": "github",
       "owner": "johnnylowmango",
