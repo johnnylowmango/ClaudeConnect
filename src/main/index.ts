@@ -437,10 +437,33 @@ function handleFileSyncEvent(event: string, data: any) {
   }
 }
 
+function notifyTerminal(from: string, type: string, content: string) {
+  // Write a visible notification to the active terminal so the user sees incoming messages
+  // Find the most recently created terminal
+  const termIds = Array.from(terminals.keys());
+  if (termIds.length === 0) return;
+  const latestId = termIds[termIds.length - 1];
+  const term = terminals.get(latestId);
+  if (!term) return;
+
+  // ANSI: save cursor, move to new line, print notification, restore
+  const truncated = content.length > 120 ? content.slice(0, 117) + '...' : content;
+  const notification = `\r\n\x1b[38;2;124;138;255m[Claude Connect]\x1b[0m \x1b[38;2;74;158;107m${from}\x1b[0m (${type}): ${truncated}\r\n`;
+  mainWindow?.webContents.send('terminal-data', { id: latestId, data: notification });
+}
+
 function setupClientEventHandler(c: RelayClient) {
   c.setEventHandler((event, data) => {
     mainWindow?.webContents.send('client-event', { event, data });
     handleFileSyncEvent(event, data);
+
+    // Terminal notification for incoming messages from other devices
+    if (event === 'message' && data.from !== lastMcpDevice) {
+      const content = data.payload?.text || data.payload?.summary || '';
+      if (content) {
+        notifyTerminal(data.from, data.type, content);
+      }
+    }
   });
 }
 
@@ -545,6 +568,44 @@ ipcMain.handle('get-connection-info', async () => {
 
 // --- Project Folder IPC ---
 
+function writeProjectClaudeMd(folder: string) {
+  const claudeMdPath = path.join(folder, 'CLAUDE.md');
+  // Don't overwrite if user has customized it (check for our marker)
+  if (fs.existsSync(claudeMdPath)) {
+    const existing = fs.readFileSync(claudeMdPath, 'utf8');
+    if (!existing.includes('<!-- claude-connect-auto -->')) return;
+  }
+
+  const content = `<!-- claude-connect-auto -->
+# Claude Connect — Cross-Machine Collaboration
+
+You are connected to other machines via Claude Connect. Follow these rules automatically:
+
+## On Every Conversation Start
+- Call \`cc_sync\` immediately (before doing anything else) to check for messages, tasks, and context from other machines.
+- If there are pending tasks assigned to you, start working on them.
+- If there are unread messages, acknowledge and act on them.
+
+## After Making File Changes
+- Call \`cc_push_files\` to push your changes to connected devices so they stay in sync.
+- Call \`cc_work_update\` with a summary of what you did.
+
+## When You Need Files From Another Machine
+- Call \`cc_pull_files\` to get the latest from the other device.
+
+## Communication
+- When you finish a task or have a question, use \`cc_send_message\` to tell the other machine.
+- When delegating work, use \`cc_delegate\` — it creates a task AND notifies the target.
+- You do NOT need to be told to sync or communicate. Do it proactively as part of your normal workflow.
+
+## Key Principle
+Act as one unified brain across machines. Sync automatically, push changes after edits, pull when you need context. The user should never have to tell you to sync — just do it.
+`;
+
+  fs.writeFileSync(claudeMdPath, content);
+  console.log('CLAUDE.md written to project folder');
+}
+
 function applyProjectPath(newPath: string) {
   projectPath = newPath;
   // Tell relay so other devices see our project path
@@ -553,6 +614,8 @@ function applyProjectPath(newPath: string) {
   if (mcpInstalled) {
     installMcpConfig(lastMcpDevice, lastMcpRole, lastMcpHost);
   }
+  // Write CLAUDE.md with auto-sync instructions
+  writeProjectClaudeMd(newPath);
 }
 
 ipcMain.handle('select-project-folder', async () => {

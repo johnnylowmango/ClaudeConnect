@@ -21,6 +21,9 @@ let tasks: any[] = [];
 let clipboard: any[] = [];
 let conversationLog: any[] = [];
 
+// Track which messages Claude has already seen — auto-deliver new ones with every tool response
+let lastDeliveredIndex = 0;
+
 // Suppress unhandled errors but keep stderr functional
 process.on('uncaughtException', () => {});
 process.on('unhandledRejection', () => {});
@@ -96,22 +99,40 @@ function relaySend(data: any) {
   if (ws && connected) { try { ws.send(JSON.stringify(data)); } catch {} }
 }
 
+// Collect unread messages from other devices since last tool call
+function drainUnread(): string {
+  const unread = conversationLog
+    .slice(lastDeliveredIndex)
+    .filter((m: any) => m.from !== DEVICE_NAME);
+  lastDeliveredIndex = conversationLog.length;
+
+  if (unread.length === 0) return '';
+
+  const lines = unread.map((m: any) => {
+    const time = new Date(m.timestamp).toLocaleTimeString();
+    const content = m.payload?.text || m.payload?.summary || JSON.stringify(m.payload);
+    return `[${time}] ${m.from} (${m.type}): ${content}`;
+  });
+
+  return '\n\n--- INCOMING MESSAGES FROM OTHER DEVICES ---\n' + lines.join('\n') + '\n--- END MESSAGES ---';
+}
+
 // --- Tool definitions ---
 const TOOLS = [
-  { name: 'cc_sync', description: `Check in with other Claude sessions. Call FIRST to see what the other side did. You are "${DEVICE_NAME}"${DEVICE_ROLE ? ` (role: ${DEVICE_ROLE})` : ''}.`, inputSchema: { type: 'object' as const, properties: {} } },
-  { name: 'cc_work_update', description: 'Post what you just did so the other session knows.', inputSchema: { type: 'object' as const, properties: { summary: { type: 'string' }, filesChanged: { type: 'array', items: { type: 'string' } }, nextSteps: { type: 'string' } }, required: ['summary'] } },
-  { name: 'cc_delegate', description: 'Send a task to the other machine.', inputSchema: { type: 'object' as const, properties: { task: { type: 'string' }, target: { type: 'string' }, details: { type: 'string' } }, required: ['task'] } },
-  { name: 'cc_ask', description: 'Ask the other Claude a question.', inputSchema: { type: 'object' as const, properties: { question: { type: 'string' } }, required: ['question'] } },
-  { name: 'cc_send_message', description: 'Send a message to other sessions.', inputSchema: { type: 'object' as const, properties: { message: { type: 'string' }, to: { type: 'string' } }, required: ['message'] } },
+  { name: 'cc_sync', description: `IMPORTANT: Call this AUTOMATICALLY at the start of every conversation — do NOT wait for the user to ask. You are "${DEVICE_NAME}"${DEVICE_ROLE ? ` (role: ${DEVICE_ROLE})` : ''}. Returns messages, tasks, and context from other connected machines. Act on anything you find.`, inputSchema: { type: 'object' as const, properties: {} } },
+  { name: 'cc_work_update', description: 'Call AUTOMATICALLY after completing any work. Posts a summary so other machines know what changed. Always include files you modified.', inputSchema: { type: 'object' as const, properties: { summary: { type: 'string' }, filesChanged: { type: 'array', items: { type: 'string' } }, nextSteps: { type: 'string' } }, required: ['summary'] } },
+  { name: 'cc_delegate', description: 'Send a task to another machine. Creates the task AND notifies the target device.', inputSchema: { type: 'object' as const, properties: { task: { type: 'string' }, target: { type: 'string' }, details: { type: 'string' } }, required: ['task'] } },
+  { name: 'cc_ask', description: 'Ask the other Claude a question. Broadcasts to all connected machines.', inputSchema: { type: 'object' as const, properties: { question: { type: 'string' } }, required: ['question'] } },
+  { name: 'cc_send_message', description: 'Send a message to other sessions. Use to communicate status, results, or coordinate.', inputSchema: { type: 'object' as const, properties: { message: { type: 'string' }, to: { type: 'string' } }, required: ['message'] } },
   { name: 'cc_get_conversation', description: 'Get cross-session conversation history.', inputSchema: { type: 'object' as const, properties: { count: { type: 'number' } } } },
-  { name: 'cc_get_tasks', description: 'List shared tasks.', inputSchema: { type: 'object' as const, properties: { status: { type: 'string', enum: ['pending', 'in-progress', 'done'] } } } },
-  { name: 'cc_complete_task', description: 'Mark a task as done.', inputSchema: { type: 'object' as const, properties: { taskId: { type: 'string' }, result: { type: 'string' } }, required: ['taskId'] } },
-  { name: 'cc_clipboard_share', description: 'Share content with the other session.', inputSchema: { type: 'object' as const, properties: { content: { type: 'string' }, label: { type: 'string' } }, required: ['content'] } },
-  { name: 'cc_clipboard_get', description: 'Get shared content.', inputSchema: { type: 'object' as const, properties: { count: { type: 'number' } } } },
-  { name: 'cc_get_devices', description: 'See connected machines.', inputSchema: { type: 'object' as const, properties: {} } },
-  { name: 'cc_push_files', description: 'Push changed files to a target device. Sends local project files that differ from the remote.', inputSchema: { type: 'object' as const, properties: { target: { type: 'string', description: 'Target device name' }, files: { type: 'array', items: { type: 'string' }, description: 'Optional specific file paths to push' } }, required: ['target'] } },
-  { name: 'cc_pull_files', description: 'Pull changed files from a target device. Requests files that differ from local.', inputSchema: { type: 'object' as const, properties: { target: { type: 'string', description: 'Target device name' } }, required: ['target'] } },
-  { name: 'cc_project_status', description: 'Compare project file manifests between this machine and a target device.', inputSchema: { type: 'object' as const, properties: { target: { type: 'string', description: 'Target device name to compare with' } }, required: ['target'] } },
+  { name: 'cc_get_tasks', description: 'List shared tasks. Check for tasks assigned to you.', inputSchema: { type: 'object' as const, properties: { status: { type: 'string', enum: ['pending', 'in-progress', 'done'] } } } },
+  { name: 'cc_complete_task', description: 'Mark a task as done. Always call this when you finish an assigned task, with a description of the result.', inputSchema: { type: 'object' as const, properties: { taskId: { type: 'string' }, result: { type: 'string' } }, required: ['taskId'] } },
+  { name: 'cc_clipboard_share', description: 'Share content (code, config, etc.) with other sessions via shared clipboard.', inputSchema: { type: 'object' as const, properties: { content: { type: 'string' }, label: { type: 'string' } }, required: ['content'] } },
+  { name: 'cc_clipboard_get', description: 'Get shared clipboard content from other sessions.', inputSchema: { type: 'object' as const, properties: { count: { type: 'number' } } } },
+  { name: 'cc_get_devices', description: 'See connected machines and their project paths.', inputSchema: { type: 'object' as const, properties: {} } },
+  { name: 'cc_push_files', description: 'CALL AUTOMATICALLY after creating or modifying files to push them to connected devices. Keeps project folders in sync.', inputSchema: { type: 'object' as const, properties: { target: { type: 'string', description: 'Target device name' }, files: { type: 'array', items: { type: 'string' }, description: 'Specific file paths to push (relative to project). Omit to push all changed files.' } }, required: ['target'] } },
+  { name: 'cc_pull_files', description: 'Pull files from a target device. Call when the other machine has made changes you need.', inputSchema: { type: 'object' as const, properties: { target: { type: 'string', description: 'Target device name' } }, required: ['target'] } },
+  { name: 'cc_project_status', description: 'Compare file manifests between machines to see what differs.', inputSchema: { type: 'object' as const, properties: { target: { type: 'string', description: 'Target device name to compare with' } }, required: ['target'] } },
 ];
 
 function handleTool(name: string, args: any): any {
@@ -224,8 +245,10 @@ function handleMessage(req: any) {
 
     case 'tools/call': {
       const result = handleTool(params.name, params.arguments || {});
+      const unread = drainUnread();
+      const text = JSON.stringify(result, null, 2) + unread;
       sendJsonRpc({ jsonrpc: '2.0', id, result: {
-        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        content: [{ type: 'text', text }],
       }});
       break;
     }
