@@ -1,0 +1,105 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <!-- Nimbusa gradient: purple-blue to mint -->
+    <linearGradient id="nimbusa" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#7c8aff"/>
+      <stop offset="50%" stop-color="#a78bfa"/>
+      <stop offset="100%" stop-color="#6ee7b7"/>
+    </linearGradient>
+    <!-- Glow gradient for the bridge arc -->
+    <linearGradient id="arcGlow" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#7c8aff"/>
+      <stop offset="100%" stop-color="#6ee7b7"/>
+    </linearGradient>
+    <!-- Radial glow behind the icon -->
+    <radialGradient id="bgGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#7c8aff" stop-opacity="0.15"/>
+      <stop offset="100%" stop-color="#08090c" stop-opacity="0"/>
+    </radialGradient>
+    <!-- Outer glow filter -->
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="18" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+    <filter id="softGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="30" result="blur"/>
+    </filter>
+    <!-- Node inner glow -->
+    <radialGradient id="nodeGlow" cx="50%" cy="40%" r="50%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.9"/>
+      <stop offset="40%" stop-color="#a78bfa" stop-opacity="0.6"/>
+      <stop offset="100%" stop-color="#7c8aff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Background circle -->
+  <circle cx="512" cy="512" r="480" fill="#08090c"/>
+  <circle cx="512" cy="512" r="480" fill="url(#bgGlow)"/>
+
+  <!-- Subtle ring border -->
+  <circle cx="512" cy="512" r="475" fill="none" stroke="url(#nimbusa)" stroke-width="2.5" opacity="0.3"/>
+
+  <!-- Ambient glow behind main elements -->
+  <ellipse cx="512" cy="420" rx="280" ry="180" fill="#7c8aff" opacity="0.06" filter="url(#softGlow)"/>
+
+  <!-- Bridge arc (the "connect" concept) -->
+  <path d="M 220 580 Q 370 200 512 220 Q 654 200 804 580"
+        fill="none" stroke="url(#arcGlow)" stroke-width="8" stroke-linecap="round"
+        filter="url(#glow)" opacity="0.9"/>
+  <!-- Secondary thinner arc -->
+  <path d="M 260 560 Q 390 260 512 275 Q 634 260 764 560"
+        fill="none" stroke="url(#arcGlow)" stroke-width="3" stroke-linecap="round" opacity="0.3"/>
+
+  <!-- Connection lines from nodes to arc -->
+  <line x1="300" y1="620" x2="330" y2="490" stroke="#7c8aff" stroke-width="3" opacity="0.4"/>
+  <line x1="724" y1="620" x2="694" y2="490" stroke="#6ee7b7" stroke-width="3" opacity="0.4"/>
+
+  <!-- Left node (machine 1) -->
+  <g filter="url(#glow)">
+    <circle cx="300" cy="650" r="68" fill="#0e1017" stroke="url(#nimbusa)" stroke-width="4"/>
+    <circle cx="300" cy="650" r="50" fill="url(#nodeGlow)" opacity="0.15"/>
+    <!-- Terminal prompt icon -->
+    <text x="268" y="668" font-family="monospace" font-size="56" font-weight="bold" fill="url(#nimbusa)">›_</text>
+  </g>
+
+  <!-- Right node (machine 2) -->
+  <g filter="url(#glow)">
+    <circle cx="724" cy="650" r="68" fill="#0e1017" stroke="url(#nimbusa)" stroke-width="4"/>
+    <circle cx="724" cy="650" r="50" fill="url(#nodeGlow)" opacity="0.15"/>
+    <!-- Terminal prompt icon -->
+    <text x="692" y="668" font-family="monospace" font-size="56" font-weight="bold" fill="url(#nimbusa)">›_</text>
+  </g>
+
+  <!-- Center sparkle / star (nod to Claude's starburst) -->
+  <g filter="url(#glow)" transform="translate(512, 380)">
+    <!-- 6-point star burst -->
+    <line x1="0" y1="-55" x2="0" y2="55" stroke="url(#nimbusa)" stroke-width="5" stroke-linecap="round"/>
+    <line x1="-48" y1="-28" x2="48" y2="28" stroke="url(#nimbusa)" stroke-width="5" stroke-linecap="round"/>
+    <line x1="-48" y1="28" x2="48" y2="-28" stroke="url(#nimbusa)" stroke-width="5" stroke-linecap="round"/>
+    <!-- Center dot -->
+    <circle cx="0" cy="0" r="12" fill="#ffffff" opacity="0.95"/>
+    <circle cx="0" cy="0" r="8" fill="url(#nimbusa)"/>
+    <!-- Small orbiting dots -->
+    <circle cx="0" cy="-55" r="5" fill="#7c8aff" opacity="0.9"/>
+    <circle cx="48" cy="28" r="5" fill="#a78bfa" opacity="0.9"/>
+    <circle cx="-48" cy="28" r="5" fill="#6ee7b7" opacity="0.9"/>
+  </g>
+
+  <!-- Data flow particles along the arc -->
+  <circle cx="350" cy="360" r="4" fill="#7c8aff" opacity="0.8"/>
+  <circle cx="430" cy="280" r="3" fill="#a78bfa" opacity="0.7"/>
+  <circle cx="594" cy="280" r="3" fill="#a78bfa" opacity="0.7"/>
+  <circle cx="674" cy="360" r="4" fill="#6ee7b7" opacity="0.8"/>
+  <circle cx="390" cy="320" r="2.5" fill="#ffffff" opacity="0.5"/>
+  <circle cx="634" cy="320" r="2.5" fill="#ffffff" opacity="0.5"/>
+
+  <!-- Dot grid pattern (subtle) -->
+  <g opacity="0.04" fill="#7c8aff">
+    <circle cx="150" cy="200" r="2"/><circle cx="200" cy="200" r="2"/><circle cx="250" cy="200" r="2"/>
+    <circle cx="150" cy="250" r="2"/><circle cx="200" cy="250" r="2"/><circle cx="250" cy="250" r="2"/>
+    <circle cx="774" cy="200" r="2"/><circle cx="824" cy="200" r="2"/><circle cx="874" cy="200" r="2"/>
+    <circle cx="774" cy="250" r="2"/><circle cx="824" cy="250" r="2"/><circle cx="874" cy="250" r="2"/>
+    <circle cx="150" cy="800" r="2"/><circle cx="200" cy="800" r="2"/><circle cx="250" cy="800" r="2"/>
+    <circle cx="774" cy="800" r="2"/><circle cx="824" cy="800" r="2"/><circle cx="874" cy="800" r="2"/>
+  </g>
+</svg>

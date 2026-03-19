@@ -36,6 +36,30 @@ function getMcpServerPath(): string {
   return path.join(__dirname, '..', 'mcp', 'server.js');
 }
 
+function getNodePath(): string {
+  // Find the full path to node so MCP works regardless of shell PATH
+  const candidates = [
+    '/opt/homebrew/bin/node',
+    '/usr/local/bin/node',
+    '/usr/bin/node',
+    // Windows
+    'C:\\Program Files\\nodejs\\node.exe',
+    'C:\\Program Files (x86)\\nodejs\\node.exe',
+  ];
+
+  // Check PATH-resolved node first
+  const { execSync } = require('child_process');
+  try {
+    const resolved = execSync(process.platform === 'win32' ? 'where node' : 'which node', { encoding: 'utf8' }).trim().split('\n')[0];
+    if (resolved && fs.existsSync(resolved)) return resolved;
+  } catch {}
+
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
+  }
+  return 'node'; // fallback
+}
+
 function installMcpConfig(deviceName: string, role: string, host: string) {
   try {
     const configPath = getClaudeConfigPath();
@@ -47,7 +71,7 @@ function installMcpConfig(deviceName: string, role: string, host: string) {
 
     config.mcpServers = config.mcpServers || {};
     config.mcpServers['claude-connect'] = {
-      command: 'node',
+      command: getNodePath(),
       args: [getMcpServerPath()],
       env: {
         CLAUDE_CONNECT_DEVICE: deviceName || os.hostname(),
@@ -221,12 +245,21 @@ ipcMain.handle('terminal-create', async (_, cwd?: string) => {
   const id = nextTerminalId++;
   const shell = process.platform === 'win32' ? 'powershell.exe' : (process.env.SHELL || '/bin/zsh');
 
-  const term = pty.spawn(shell, [], {
+  // Build a proper PATH that includes common locations for node/claude
+  const extraPaths = [
+    path.join(os.homedir(), '.local', 'bin'),
+    '/opt/homebrew/bin',
+    '/usr/local/bin',
+  ];
+  const currentPath = process.env.PATH || '';
+  const fullPath = [...extraPaths, ...currentPath.split(':')].filter(Boolean).join(':');
+
+  const term = pty.spawn(shell, process.platform === 'win32' ? [] : ['-l'], {
     name: 'xterm-256color',
     cols: 120,
     rows: 30,
     cwd: cwd || os.homedir(),
-    env: { ...process.env, TERM: 'xterm-256color' },
+    env: { ...process.env, TERM: 'xterm-256color', PATH: fullPath },
   });
 
   terminals.set(id, term);

@@ -197,7 +197,8 @@ export default function App() {
           foreground: '#e8e9ed',
           cursor: '#7c8aff',
           cursorAccent: '#08090c',
-          selectionBackground: 'rgba(124, 138, 255, 0.3)',
+          selectionBackground: 'rgba(124, 138, 255, 0.15)',
+          selectionForeground: '#ffffff',
           black: '#1a1b26',
           red: '#e05c5c',
           green: '#4a9e6b',
@@ -241,6 +242,23 @@ export default function App() {
         if (termIdRef.current !== null) {
           ipcRenderer.invoke('terminal-write', termIdRef.current, data);
         }
+      });
+
+      // Enable copy with Cmd+C / Ctrl+C (when text is selected)
+      term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
+        if (e.type === 'keydown' && (e.metaKey || e.ctrlKey) && e.key === 'c' && term.hasSelection()) {
+          navigator.clipboard.writeText(term.getSelection());
+          return false; // prevent sending to shell
+        }
+        if (e.type === 'keydown' && (e.metaKey || e.ctrlKey) && e.key === 'v') {
+          navigator.clipboard.readText().then(text => {
+            if (termIdRef.current !== null) {
+              ipcRenderer.invoke('terminal-write', termIdRef.current, text);
+            }
+          });
+          return false;
+        }
+        return true;
       });
 
       term.write('\x1b[38;2;124;138;255m');
