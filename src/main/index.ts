@@ -373,6 +373,13 @@ ipcMain.handle('terminal-create', async (_, cwd?: string) => {
       mainWindow?.webContents.send('command-terminal-output', {
         termId: id, text: stripped,
       });
+      // Also relay to other machines so their Command Center sees our output
+      if (client && deviceToTerminal.has(lastMcpDevice)) {
+        const boundId = deviceToTerminal.get(lastMcpDevice);
+        if (boundId === id) {
+          client.sendTerminalOutput(stripped);
+        }
+      }
     }
   });
 
@@ -662,6 +669,14 @@ function setupClientEventHandler(c: RelayClient) {
           timestamp: Date.now(),
         });
       }
+    }
+
+    // Handle remote terminal output — show in local Command Center
+    if (event === 'terminal-output' && data.from !== lastMcpDevice) {
+      mainWindow?.webContents.send('command-remote-output', {
+        deviceName: data.from,
+        text: data.text,
+      });
     }
 
     // Handle prompt-inject from remote device (cross-machine prompt injection)

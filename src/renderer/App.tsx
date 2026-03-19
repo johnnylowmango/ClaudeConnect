@@ -86,6 +86,8 @@ export default function App() {
           break;
         case 'device-connected':
           setDevices(prev => [...prev.filter(d => d.name !== data.name), data]);
+          // Auto-select newly connected devices as targets
+          setSelectedTargets(prev => prev.includes(data.name) ? prev : [...prev, data.name]);
           break;
         case 'device-disconnected':
           setDevices(prev => prev.filter(d => d.name !== data.name));
@@ -116,7 +118,7 @@ export default function App() {
       }
     });
 
-    // Command Center events
+    // Command Center events — terminal output streaming
     ipcRenderer.on('command-terminal-output', (_: any, { termId, text }: any) => {
       let devName = '';
       for (const [name, tid] of boundTerminals.current) {
@@ -145,13 +147,25 @@ export default function App() {
           e => e.kind === 'response' && e.deviceName === devName && e.streaming
         );
         if (lastResponse) {
+          // Append to existing streaming response
           return prev.map(e =>
             e.id === lastResponse.id
               ? { ...e, text: e.text + text, timestamp: Date.now() }
               : e
           );
         }
-        return prev;
+        // No streaming response exists — create one automatically
+        // This captures Claude's output even before/between prompts
+        return [...prev, {
+          kind: 'response' as const,
+          id: `resp-${Date.now()}-${devName}`,
+          promptId: 'auto',
+          deviceName: devName,
+          text: text,
+          timestamp: Date.now(),
+          streaming: true,
+          collapsed: false,
+        }];
       });
     });
 
@@ -163,17 +177,61 @@ export default function App() {
       if (!devName) return;
 
       setCommandEntries(prev => {
+        // Close previous streaming response for this device
         const updated = prev.map(e =>
           e.kind === 'response' && e.deviceName === devName && e.streaming
             ? { ...e, streaming: false }
             : e
         );
+        // Create new streaming response for this prompt
         return [...updated, {
           kind: 'response' as const,
           id: `resp-${Date.now()}-${devName}`,
           promptId,
           deviceName: devName,
           text: '',
+          timestamp: Date.now(),
+          streaming: true,
+          collapsed: false,
+        }];
+      });
+    });
+
+    // Remote device terminal output (via relay)
+    ipcRenderer.on('command-remote-output', (_: any, { deviceName: devName, text }: any) => {
+      setDeviceStatuses(prev => {
+        const next = new Map(prev);
+        next.set(devName, 'active');
+        return next;
+      });
+      setTimeout(() => {
+        setDeviceStatuses(prev => {
+          if (prev.get(devName) === 'active') {
+            const next = new Map(prev);
+            next.set(devName, 'idle');
+            return next;
+          }
+          return prev;
+        });
+      }, 2000);
+
+      setCommandEntries(prev => {
+        const lastResponse = [...prev].reverse().find(
+          e => e.kind === 'response' && e.deviceName === devName && e.streaming
+        );
+        if (lastResponse) {
+          return prev.map(e =>
+            e.id === lastResponse.id
+              ? { ...e, text: e.text + text, timestamp: Date.now() }
+              : e
+          );
+        }
+        return [...prev, {
+          kind: 'response' as const,
+          id: `resp-${Date.now()}-${devName}`,
+          promptId: 'remote',
+          deviceName: devName,
+          text: text,
           timestamp: Date.now(),
           streaming: true,
           collapsed: false,
@@ -210,6 +268,7 @@ export default function App() {
       ipcRenderer.removeAllListeners('terminal-data');
       ipcRenderer.removeAllListeners('terminal-exit');
       ipcRenderer.removeAllListeners('command-terminal-output');
+      ipcRenderer.removeAllListeners('command-remote-output');
       ipcRenderer.removeAllListeners('command-injected');
       ipcRenderer.removeAllListeners('command-event');
     };
@@ -373,9 +432,10 @@ export default function App() {
       await ipcRenderer.invoke('terminal-write', result.id, 'claude\n');
       setClaudeLaunched(true);
 
-      setSelectedTargets(prev =>
-        prev.includes(myName) ? prev : [...prev, myName]
-      );
+      // Auto-select all online devices (including self for broadcast)
+      const allOnline = devices.filter(d => d.status === 'online').map(d => d.name);
+      if (!allOnline.includes(myName)) allOnline.push(myName);
+      setSelectedTargets(allOnline);
     }
   };
 

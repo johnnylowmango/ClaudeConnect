@@ -125,6 +125,9 @@ export class RelayClient {
       case 'prompt-inject':
         this.emit('prompt-inject', msg);
         break;
+      case 'terminal-output':
+        this.emit('terminal-output', msg);
+        break;
     }
   }
 
@@ -174,6 +177,10 @@ export class RelayClient {
 
   sendPromptInject(target: string, text: string, promptId: string) {
     this.send({ action: 'prompt-inject', target, text, promptId });
+  }
+
+  sendTerminalOutput(text: string) {
+    this.send({ action: 'terminal-output', text });
   }
 
   private send(data: any) {

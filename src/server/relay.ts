@@ -307,6 +307,17 @@ export class RelayServer {
         break;
       }
 
+      case 'terminal-output': {
+        // Relay terminal output from a device to all others (for Command Center)
+        const senderName = this.clients.get(clientId)?.device.name || 'unknown';
+        this.broadcast({
+          type: 'terminal-output',
+          from: senderName,
+          text: msg.text,
+        }, clientId);
+        break;
+      }
+
       case 'get-state': {
         ws.send(JSON.stringify({
           type: 'state',
