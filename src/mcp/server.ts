@@ -5,14 +5,14 @@
  * Newline-delimited JSON-RPC over stdio (matches MCP SDK transport)
  */
 
-const WS = require('ws');
+// Zero external dependencies — uses Node's built-in WebSocket (Node 21+)
 
 const RELAY_HOST = process.env.CLAUDE_CONNECT_HOST || 'localhost';
 const RELAY_PORT = parseInt(process.env.CLAUDE_CONNECT_PORT || '3377');
 const DEVICE_NAME = process.env.CLAUDE_CONNECT_DEVICE || `claude-${process.platform}-${process.pid}`;
 const DEVICE_ROLE = process.env.CLAUDE_CONNECT_ROLE || '';
 
-let ws: any = null;
+let ws: WebSocket | null = null;
 let connected = false;
 let devices: any[] = [];
 let recentMessages: any[] = [];
@@ -26,16 +26,16 @@ process.on('unhandledRejection', () => {});
 
 function connectToRelay() {
   try {
-    ws = new WS(`ws://${RELAY_HOST}:${RELAY_PORT}`);
-    ws.on('open', () => {
+    ws = new WebSocket(`ws://${RELAY_HOST}:${RELAY_PORT}`);
+    ws.addEventListener('open', () => {
       connected = true;
-      ws.send(JSON.stringify({ action: 'register', deviceName: DEVICE_NAME, platform: process.platform }));
+      ws!.send(JSON.stringify({ action: 'register', deviceName: DEVICE_NAME, platform: process.platform }));
     });
-    ws.on('message', (data: any) => {
-      try { handleRelayMessage(JSON.parse(data.toString())); } catch {}
+    ws.addEventListener('message', (event: any) => {
+      try { handleRelayMessage(JSON.parse(typeof event.data === 'string' ? event.data : event.data.toString())); } catch {}
     });
-    ws.on('close', () => { connected = false; ws = null; setTimeout(connectToRelay, 3000); });
-    ws.on('error', () => { connected = false; ws = null; });
+    ws.addEventListener('close', () => { connected = false; ws = null; setTimeout(connectToRelay, 3000); });
+    ws.addEventListener('error', () => { connected = false; ws = null; });
   } catch {
     setTimeout(connectToRelay, 3000);
   }
@@ -188,4 +188,4 @@ function handleMessage(req: any) {
   }
 }
 
-process.on('SIGINT', () => { if (ws) ws.close(); process.exit(0); });
+process.on('SIGINT', () => { if (ws) { try { ws.close(); } catch {} } process.exit(0); });
