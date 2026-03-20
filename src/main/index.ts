@@ -441,10 +441,13 @@ ipcMain.handle('terminal-create', async (_, cwd?: string) => {
     const stripped = stripAnsi(data);
     if (stripped.trim() && stripped.length > 1) {
       mainWindow?.webContents.send('command-terminal-output', { termId: id, text: stripped });
-      if (client && deviceToTerminal.has(lastMcpDevice)) {
-        const boundId = deviceToTerminal.get(lastMcpDevice);
-        if (boundId === id) {
-          client.sendTerminalOutput(stripped);
+      // Relay terminal output to remote machines if this terminal is bound to any device
+      if (client) {
+        for (const [, tid] of deviceToTerminal) {
+          if (tid === id) {
+            client.sendTerminalOutput(stripped);
+            break;
+          }
         }
       }
     }
@@ -693,10 +696,15 @@ function setupClientEventHandler(c: RelayClient) {
     }
 
     // Auto-inject incoming messages into Claude terminal
-    if (event === 'message' && data.from !== lastMcpDevice) {
+    if (event === 'message' && data.from !== (lastMcpDevice || os.hostname())) {
       const content = data.payload?.text || data.payload?.summary || '';
       if (content) {
-        const localTermId = deviceToTerminal.get(lastMcpDevice);
+        let localTermId = deviceToTerminal.get(lastMcpDevice);
+        if (localTermId === undefined) {
+          for (const [, tid] of deviceToTerminal) {
+            if (terminals.has(tid)) { localTermId = tid; break; }
+          }
+        }
         if (localTermId !== undefined && terminals.has(localTermId)) {
           const injectionText = `[${data.from} says]: ${content}`;
           injectIntoTerminal(localTermId, injectionText, `auto-${data.id || Date.now()}`);
@@ -737,13 +745,20 @@ function setupClientEventHandler(c: RelayClient) {
 
     // Prompt injection from remote device
     if (event === 'prompt-inject') {
-      const localTermId = deviceToTerminal.get(lastMcpDevice);
+      // Find any bound terminal — try lastMcpDevice first, then any available
+      let localTermId = deviceToTerminal.get(lastMcpDevice);
+      if (localTermId === undefined) {
+        // Fall back to first available bound terminal
+        for (const [, tid] of deviceToTerminal) {
+          if (terminals.has(tid)) { localTermId = tid; break; }
+        }
+      }
       if (localTermId !== undefined && terminals.has(localTermId)) {
         injectIntoTerminal(localTermId, data.text, data.promptId || `remote-${Date.now()}`);
         mainWindow?.webContents.send('command-event', {
           id: `evt-${Date.now()}`,
           type: 'info',
-          text: `Prompt from ${data.from}`,
+          text: `Prompt from ${data.from}: ${data.text}`,
           timestamp: Date.now(),
         });
       }

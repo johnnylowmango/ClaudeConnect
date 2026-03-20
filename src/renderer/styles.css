@@ -735,6 +735,8 @@ input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-gl
   font-size: 13px;
   line-height: 1.5;
   color: var(--text-primary);
+  white-space: pre-wrap;
+  word-wrap: break-word;
 }
 
 /* Device responses */
