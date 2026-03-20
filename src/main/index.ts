@@ -370,12 +370,20 @@ function autoSyncChangedFiles() {
 
 ipcMain.handle('terminal-create', async (_, cwd?: string) => {
   if (!pty) {
-    return { success: false, error: 'Terminal not available' };
+    return { success: false, error: 'Terminal not available — node-pty failed to load' };
   }
 
   const id = nextTerminalId++;
   const isWin = process.platform === 'win32';
-  const shell = isWin ? 'powershell.exe' : (process.env.SHELL || '/bin/zsh');
+
+  // Find a valid shell — try SHELL env, then common paths
+  let shell = isWin ? 'powershell.exe' : (process.env.SHELL || '/bin/zsh');
+  if (!isWin) {
+    const shellCandidates = [shell, '/bin/zsh', '/bin/bash', '/bin/sh'];
+    shell = shellCandidates.find(s => {
+      try { return fs.existsSync(s); } catch { return false; }
+    }) || '/bin/sh';
+  }
 
   const env: Record<string, string> = { ...process.env } as any;
   if (isWin) {
@@ -387,22 +395,41 @@ ipcMain.handle('terminal-create', async (_, cwd?: string) => {
     env.PATH = [...extraPaths, env.PATH || ''].filter(Boolean).join(';');
   } else {
     const extraPaths = [
+      path.join(os.homedir(), '.nvm', 'versions', 'node'),
       path.join(os.homedir(), '.local', 'bin'),
       '/opt/homebrew/bin',
       '/usr/local/bin',
+      '/usr/bin',
+      '/bin',
     ];
     env.PATH = [...extraPaths, ...(env.PATH || '').split(':')].filter(Boolean).join(':');
     env.TERM = 'xterm-256color';
   }
 
   const projectPath = getProjectPath();
-  const term = pty.spawn(shell, isWin ? ['-NoLogo'] : ['-l'], {
-    name: 'xterm-256color',
-    cols: 120,
-    rows: 30,
-    cwd: cwd || projectPath || os.homedir(),
-    env,
-  });
+  // Ensure cwd exists — posix_spawnp fails on non-existent directories
+  let finalCwd = cwd || projectPath || os.homedir();
+  try {
+    if (!fs.existsSync(finalCwd)) {
+      fs.mkdirSync(finalCwd, { recursive: true });
+    }
+  } catch {
+    finalCwd = os.homedir();
+  }
+
+  let term: any;
+  try {
+    term = pty.spawn(shell, isWin ? ['-NoLogo'] : ['-l'], {
+      name: 'xterm-256color',
+      cols: 120,
+      rows: 30,
+      cwd: finalCwd,
+      env,
+    });
+  } catch (err: any) {
+    console.error('Failed to spawn terminal:', shell, finalCwd, err);
+    return { success: false, error: `Failed to spawn shell (${shell}): ${err.message}` };
+  }
 
   terminals.set(id, term);
 

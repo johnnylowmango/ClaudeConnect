@@ -407,43 +407,58 @@ export default function App() {
   };
 
   const handleLaunchClaude = async () => {
+    // Kill existing terminal if any
     if (termIdRef.current !== null) {
       await ipcRenderer.invoke('terminal-kill', termIdRef.current);
       termIdRef.current = null;
+      setClaudeLaunched(false);
     }
 
-    // Get the active project path so Claude launches in the right directory
     const projectInfo = await ipcRenderer.invoke('get-project-folder');
     const result = await ipcRenderer.invoke('terminal-create', projectInfo?.path || undefined);
-    if (result.success) {
-      termIdRef.current = result.id;
-      // Use the SAME name that was registered with the relay so lookups match
-      const myName = deviceName || connectionInfo?.hostname || 'local';
-      localDeviceName.current = myName;
-
-      // Bind terminal to our device name AND all possible name variants
-      boundTerminals.current.set(myName, result.id);
-      if (connectionInfo?.hostname && connectionInfo.hostname !== myName) {
-        boundTerminals.current.set(connectionInfo.hostname, result.id);
-      }
-      await ipcRenderer.invoke('bind-terminal-device', result.id, myName);
-
-      // cd to project folder first, then launch claude
-      if (projectInfo?.path) {
-        await ipcRenderer.invoke('terminal-write', result.id, `cd "${projectInfo.path}"\n`);
-        await new Promise(r => setTimeout(r, 500));
-      }
-      await ipcRenderer.invoke('terminal-write', result.id, 'claude\n');
-      setClaudeLaunched(true);
-
-      // Show terminal so user can see Claude launching
-      setTerminalVisible(true);
-
-      // Select all online devices as targets
-      const allOnline = devices.filter(d => d.status === 'online').map(d => d.name);
-      if (!allOnline.includes(myName)) allOnline.push(myName);
-      setSelectedTargets(allOnline);
+    if (!result.success) {
+      setCommandEntries(prev => [...prev, {
+        kind: 'event' as const, id: `evt-${Date.now()}`,
+        text: `Failed to launch terminal: ${result.error}`, timestamp: Date.now(), type: 'error',
+      }]);
+      return;
     }
+
+    termIdRef.current = result.id;
+    const myName = deviceName || connectionInfo?.hostname || 'local';
+    localDeviceName.current = myName;
+
+    // Bind terminal to our device name AND all name variants
+    boundTerminals.current.set(myName, result.id);
+    if (connectionInfo?.hostname && connectionInfo.hostname !== myName) {
+      boundTerminals.current.set(connectionInfo.hostname, result.id);
+    }
+    // Also bind to all online device names that match our platform
+    for (const d of devices) {
+      if (d.platform === (navigator.platform.startsWith('Win') ? 'win32' : 'darwin')) {
+        boundTerminals.current.set(d.name, result.id);
+      }
+    }
+    await ipcRenderer.invoke('bind-terminal-device', result.id, myName);
+
+    // Show terminal so user can see what's happening
+    setTerminalVisible(true);
+
+    // Wait for shell to fully initialize (login shell sources profile)
+    await new Promise(r => setTimeout(r, 1500));
+
+    // cd to project folder and launch claude
+    if (projectInfo?.path) {
+      await ipcRenderer.invoke('terminal-write', result.id, `cd "${projectInfo.path}"\n`);
+      await new Promise(r => setTimeout(r, 500));
+    }
+    await ipcRenderer.invoke('terminal-write', result.id, 'claude\n');
+    setClaudeLaunched(true);
+
+    // Select all online devices as targets
+    const allOnline = devices.filter(d => d.status === 'online').map(d => d.name);
+    if (!allOnline.includes(myName)) allOnline.push(myName);
+    setSelectedTargets(allOnline);
   };
 
   const toggleTarget = (name: string) => {
@@ -764,11 +779,9 @@ export default function App() {
                 </button>
               ))}
               <div className="command-bar-actions">
-                {!claudeLaunched && (
-                  <button className="btn btn-primary btn-small" onClick={handleLaunchClaude}>
-                    Launch Claude
-                  </button>
-                )}
+                <button className="btn btn-primary btn-small" onClick={handleLaunchClaude}>
+                  {claudeLaunched ? 'Relaunch Claude' : 'Launch Claude'}
+                </button>
                 <button
                   className={`btn btn-small ${terminalVisible ? 'btn-secondary' : 'btn-secondary'}`}
                   onClick={() => setTerminalVisible(!terminalVisible)}
