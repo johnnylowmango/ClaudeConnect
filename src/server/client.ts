@@ -1,5 +1,5 @@
 import WebSocket from 'ws';
-import { ConnectMessage, DeviceInfo, TaskItem, ClipboardEntry } from '../shared/types';
+import { ConnectMessage, DeviceInfo, TaskItem, ClipboardEntry, ProjectEntry } from '../shared/types';
 
 export class RelayClient {
   private ws: WebSocket | null = null;
@@ -75,9 +75,7 @@ export class RelayClient {
         try { this.ws.removeAllListeners(); this.ws.close(); } catch {}
         this.ws = null;
       }
-      this.connect(host, port).catch(() => {
-        // will retry on close
-      });
+      this.connect(host, port).catch(() => {});
     }, 3000);
   }
 
@@ -128,6 +126,13 @@ export class RelayClient {
       case 'terminal-output':
         this.emit('terminal-output', msg);
         break;
+      // Project events
+      case 'project-created':
+        this.emit('project-created', msg.project);
+        break;
+      case 'project-list':
+        this.emit('project-list', msg.projects);
+        break;
     }
   }
 
@@ -155,8 +160,21 @@ export class RelayClient {
     this.send({ action: 'get-state' });
   }
 
-  setProject(projectPath: string) {
-    this.send({ action: 'set-project', projectPath });
+  setProject(projectPath: string, projectId?: string, projectName?: string) {
+    this.send({ action: 'set-project', projectPath, projectId, projectName });
+  }
+
+  // Project management
+  broadcastProjectCreate(project: ProjectEntry) {
+    this.send({ action: 'project-create', project });
+  }
+
+  syncProjectList(projects: ProjectEntry[]) {
+    this.send({ action: 'project-list-sync', projects });
+  }
+
+  switchProject(projectId: string, projectName: string, projectPath: string) {
+    this.send({ action: 'project-switch', projectId, projectName, projectPath });
   }
 
   requestFileSync(target: string, syncId: string, manifest: any[], direction: 'push' | 'pull', filePaths?: string[]) {

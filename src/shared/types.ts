@@ -2,17 +2,17 @@
 
 export interface ConnectMessage {
   id: string;
-  type: 'context' | 'task' | 'clipboard' | 'status' | 'chat';
-  from: string;       // device name
-  to?: string;        // target device, or broadcast if undefined
+  type: 'context' | 'task' | 'clipboard' | 'status' | 'chat' | 'work-update';
+  from: string;
+  to?: string;
   timestamp: number;
   payload: any;
 }
 
 export interface ContextUpdate {
-  summary: string;         // what Claude just did
-  activeFiles: string[];   // files being worked on
-  currentTask?: string;    // what's in progress
+  summary: string;
+  activeFiles: string[];
+  currentTask?: string;
   workingDirectory: string;
 }
 
@@ -20,11 +20,12 @@ export interface TaskItem {
   id: string;
   title: string;
   status: 'pending' | 'in-progress' | 'done';
-  assignedTo?: string;     // device name
+  assignedTo?: string;
   createdBy: string;
   createdAt: number;
   updatedAt: number;
   notes?: string;
+  projectId?: string;
 }
 
 export interface ClipboardEntry {
@@ -42,6 +43,8 @@ export interface DeviceInfo {
   lastSeen: number;
   status: 'online' | 'away' | 'offline';
   projectPath?: string;
+  activeProjectId?: string;
+  activeProjectName?: string;
 }
 
 export interface ServerState {
@@ -51,20 +54,42 @@ export interface ServerState {
   clipboard: ClipboardEntry[];
 }
 
+// --- Project & Workspace types ---
+
+export interface ProjectEntry {
+  id: string;
+  name: string;
+  createdAt: number;
+  lastOpenedAt: number;
+  devices: { [deviceName: string]: DeviceProjectState };
+}
+
+export interface DeviceProjectState {
+  localPath: string;
+  lastSynced: number;
+  status: 'synced' | 'behind' | 'ahead' | 'unknown';
+}
+
+export interface WorkspaceConfig {
+  root: string;
+  projects: ProjectEntry[];
+  activeProjectId: string | null;
+}
+
 // File sync types
 export interface FileManifestEntry {
-  path: string;           // forward-slash normalized relative path
+  path: string;
   size: number;
-  quickHash: string;      // SHA-256 prefix of first 4KB + last 4KB + size
+  quickHash: string;
   modifiedAt: number;
 }
 
 export interface FileChunk {
-  syncId: string;         // groups chunks for one sync operation
-  filePath: string;       // relative path (forward slashes)
+  syncId: string;
+  filePath: string;
   chunkIndex: number;
   totalChunks: number;
-  data: string;           // base64
+  data: string;
   fileSize: number;
 }
 
@@ -101,9 +126,9 @@ export interface TerminalBinding {
 export interface CommandPrompt {
   id: string;
   text: string;
-  targets: string[];        // device names
+  targets: string[];
   timestamp: number;
-  from: 'user' | string;    // 'user' or device name for cross-machine
+  from: 'user' | string;
 }
 
 export interface CommandResponse {
@@ -131,8 +156,8 @@ export type CommandEntry =
 export const DEFAULT_PORT = 3377;
 export const MAX_MESSAGES = 500;
 export const MAX_CLIPBOARD = 50;
-export const FILE_CHUNK_SIZE = 768 * 1024; // 768KB raw → ~1MB base64
-export const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB per file limit
+export const FILE_CHUNK_SIZE = 768 * 1024;
+export const MAX_FILE_SIZE = 50 * 1024 * 1024;
 
 export const IGNORE_PATTERNS = [
   'node_modules', '.git', 'dist', 'build', '.next', '.nuxt',

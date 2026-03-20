@@ -1,6 +1,6 @@
 {
   "name": "claude-connect",
-  "version": "1.4.0",
+  "version": "2.0.0",
   "description": "Bridge Claude Code sessions across machines",
   "main": "dist/main/index.js",
   "scripts": {

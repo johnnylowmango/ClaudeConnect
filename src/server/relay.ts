@@ -5,6 +5,7 @@ import {
   DeviceInfo,
   TaskItem,
   ClipboardEntry,
+  ProjectEntry,
   DEFAULT_PORT,
   MAX_MESSAGES,
   MAX_CLIPBOARD,
@@ -21,6 +22,7 @@ export class RelayServer {
   private messages: ConnectMessage[] = [];
   private tasks: TaskItem[] = [];
   private clipboard: ClipboardEntry[] = [];
+  private projects: ProjectEntry[] = [];
   private onEvent?: (event: string, data: any) => void;
   private pingInterval: NodeJS.Timeout | null = null;
 
@@ -39,7 +41,6 @@ export class RelayServer {
           console.log(`Claude Connect relay server running on port ${this.port}`);
           this.emit('server-started', { port: this.port });
 
-          // Keep-alive: ping all clients every 15s to prevent timeout
           this.pingInterval = setInterval(() => {
             for (const [, client] of this.clients) {
               if (client.ws.readyState === WebSocket.OPEN) {
@@ -79,6 +80,10 @@ export class RelayServer {
       this.clients.clear();
       this.emit('server-stopped', {});
     }
+  }
+
+  setProjects(projects: ProjectEntry[]) {
+    this.projects = projects;
   }
 
   private handleConnection(ws: WebSocket, req: any) {
@@ -124,7 +129,6 @@ export class RelayServer {
         this.clients.set(clientId, { ws, device });
         this.emit('device-connected', device);
 
-        // Send current state to new client
         ws.send(JSON.stringify({
           type: 'welcome',
           device,
@@ -132,6 +136,7 @@ export class RelayServer {
           recentMessages: this.messages.slice(-50),
           tasks: this.tasks,
           clipboard: this.clipboard,
+          projects: this.projects,
         }));
 
         this.broadcast({ type: 'device-connected', device }, clientId);
@@ -153,15 +158,12 @@ export class RelayServer {
         }
 
         if (msg.to) {
-          // Direct message
           this.sendTo(msg.to, { type: 'message', message: connectMsg });
-          // Also echo back to sender
           const sender = this.clients.get(clientId);
           if (sender && sender.ws.readyState === WebSocket.OPEN) {
             sender.ws.send(JSON.stringify({ type: 'message', message: connectMsg }));
           }
         } else {
-          // Broadcast to ALL including sender
           this.broadcast({ type: 'message', message: connectMsg });
         }
         this.emit('message', connectMsg);
@@ -178,6 +180,7 @@ export class RelayServer {
           createdAt: Date.now(),
           updatedAt: Date.now(),
           notes: msg.notes,
+          projectId: msg.projectId,
         };
         this.tasks.push(task);
         this.broadcast({ type: 'task-update', task }, undefined);
@@ -213,8 +216,6 @@ export class RelayServer {
       }
 
       case 'mcp-trigger-sync': {
-        // MCP server asks the local Electron app to do a file sync
-        // Route to all clients with the same device name (the Electron app)
         const senderDevice = this.clients.get(clientId)?.device;
         if (senderDevice) {
           for (const [id, c] of this.clients) {
@@ -236,13 +237,55 @@ export class RelayServer {
         const client = this.clients.get(clientId);
         if (client) {
           client.device.projectPath = msg.projectPath;
+          client.device.activeProjectId = msg.projectId;
+          client.device.activeProjectName = msg.projectName;
           this.broadcast({ type: 'device-updated', device: client.device }, undefined);
         }
         break;
       }
 
+      case 'project-create': {
+        // A device created a new project — broadcast to all
+        const project: ProjectEntry = msg.project;
+        const existing = this.projects.find(p => p.id === project.id);
+        if (!existing) {
+          this.projects.push(project);
+        }
+        this.broadcast({ type: 'project-created', project }, clientId);
+        this.emit('project-created', project);
+        break;
+      }
+
+      case 'project-list-sync': {
+        // Device is sharing its full project list
+        const incomingProjects: ProjectEntry[] = msg.projects || [];
+        for (const p of incomingProjects) {
+          const existing = this.projects.find(ep => ep.id === p.id);
+          if (!existing) {
+            this.projects.push(p);
+          } else {
+            // Merge device info
+            Object.assign(existing.devices, p.devices);
+          }
+        }
+        // Broadcast updated project list to all
+        this.broadcast({ type: 'project-list', projects: this.projects }, undefined);
+        break;
+      }
+
+      case 'project-switch': {
+        const client = this.clients.get(clientId);
+        if (client) {
+          client.device.activeProjectId = msg.projectId;
+          client.device.activeProjectName = msg.projectName;
+          client.device.projectPath = msg.projectPath;
+          this.broadcast({ type: 'device-updated', device: client.device }, undefined);
+          this.emit('project-switched', { device: client.device, projectId: msg.projectId });
+        }
+        break;
+      }
+
       case 'file-sync-request': {
-        // Forward sync request to target device
         if (msg.target) {
           this.sendTo(msg.target, {
             type: 'file-sync-request',
@@ -250,14 +293,13 @@ export class RelayServer {
             syncId: msg.syncId,
             manifest: msg.manifest,
             filePaths: msg.filePaths,
-            direction: msg.direction, // 'push' or 'pull'
+            direction: msg.direction,
           });
         }
         break;
       }
 
       case 'file-chunk': {
-        // Route chunk to target device
         if (msg.target) {
           this.sendTo(msg.target, {
             type: 'file-chunk',
@@ -269,7 +311,6 @@ export class RelayServer {
       }
 
       case 'file-sync-status': {
-        // Forward status update to target device
         if (msg.target) {
           this.sendTo(msg.target, {
             type: 'file-sync-status',
@@ -281,7 +322,6 @@ export class RelayServer {
       }
 
       case 'file-manifest-response': {
-        // Forward manifest response to requesting device
         if (msg.target) {
           this.sendTo(msg.target, {
             type: 'file-manifest-response',
@@ -294,7 +334,6 @@ export class RelayServer {
       }
 
       case 'prompt-inject': {
-        // Route prompt injection to target device's Electron app
         const senderName = this.clients.get(clientId)?.device.name || 'unknown';
         if (msg.target) {
           this.sendTo(msg.target, {
@@ -308,7 +347,6 @@ export class RelayServer {
       }
 
       case 'terminal-output': {
-        // Relay terminal output from a device to all others (for Command Center)
         const senderName = this.clients.get(clientId)?.device.name || 'unknown';
         this.broadcast({
           type: 'terminal-output',
@@ -325,6 +363,7 @@ export class RelayServer {
           messages: this.messages.slice(-50),
           tasks: this.tasks,
           clipboard: this.clipboard,
+          projects: this.projects,
         }));
         break;
       }
@@ -367,6 +406,10 @@ export class RelayServer {
 
   getClipboard(): ClipboardEntry[] {
     return this.clipboard;
+  }
+
+  getProjects(): ProjectEntry[] {
+    return this.projects;
   }
 
   isRunning(): boolean {

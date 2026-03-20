@@ -2,12 +2,20 @@
 
 /**
  * Claude Connect MCP Server
- * Newline-delimited JSON-RPC over stdio (matches MCP SDK transport)
+ * Newline-delimited JSON-RPC over stdio (MCP protocol compliant)
  */
 
-// Zero external dependencies — uses Node's built-in WebSocket (Node 21+)
 const fs = require('fs');
 const nodePath = require('path');
+
+// WebSocket: use ws package for reliability across all Node versions
+let WS: any;
+try {
+  WS = require('ws');
+} catch {
+  // Fallback to Node built-in WebSocket (Node 21+)
+  WS = (globalThis as any).WebSocket;
+}
 
 const RELAY_HOST = process.env.CLAUDE_CONNECT_HOST || 'localhost';
 const RELAY_PORT = parseInt(process.env.CLAUDE_CONNECT_PORT || '3377');
@@ -15,40 +23,82 @@ const DEVICE_NAME = process.env.CLAUDE_CONNECT_DEVICE || `claude-${process.platf
 const DEVICE_ROLE = process.env.CLAUDE_CONNECT_ROLE || '';
 let projectPath = process.env.CLAUDE_CONNECT_PROJECT || '';
 
-let ws: WebSocket | null = null;
+let ws: any = null;
 let connected = false;
 let devices: any[] = [];
 let recentMessages: any[] = [];
 let tasks: any[] = [];
 let clipboard: any[] = [];
 let conversationLog: any[] = [];
-
-// Track which messages Claude has already seen — auto-deliver new ones with every tool response
 let lastDeliveredIndex = 0;
+let relayConnectPending = false;
 
-// Suppress unhandled errors but keep stderr functional
-process.on('uncaughtException', () => {});
-process.on('unhandledRejection', () => {});
+// Log to stderr (never stdout — that's for MCP JSON-RPC)
+function log(msg: string) {
+  process.stderr.write(`[claude-connect-mcp] ${msg}\n`);
+}
 
 function connectToRelay() {
+  if (!WS) {
+    log('No WebSocket implementation available — relay features disabled');
+    return;
+  }
+  if (relayConnectPending || connected) return;
+  relayConnectPending = true;
+
   try {
-    ws = new WebSocket(`ws://${RELAY_HOST}:${RELAY_PORT}`);
-    ws.addEventListener('open', () => {
+    ws = new WS(`ws://${RELAY_HOST}:${RELAY_PORT}`);
+
+    const onOpen = () => {
       connected = true;
-      ws!.send(JSON.stringify({ action: 'register', deviceName: DEVICE_NAME, platform: process.platform }));
-    });
-    ws.addEventListener('message', (event: any) => {
-      try { handleRelayMessage(JSON.parse(typeof event.data === 'string' ? event.data : event.data.toString())); } catch {}
-    });
-    ws.addEventListener('close', () => { connected = false; ws = null; setTimeout(connectToRelay, 3000); });
-    ws.addEventListener('error', () => { connected = false; ws = null; });
-  } catch {
+      relayConnectPending = false;
+      log(`Connected to relay at ${RELAY_HOST}:${RELAY_PORT}`);
+      ws.send(JSON.stringify({ action: 'register', deviceName: DEVICE_NAME, platform: process.platform }));
+    };
+
+    const onMessage = (event: any) => {
+      try {
+        const data = typeof event === 'string' ? event
+          : typeof event.data === 'string' ? event.data
+          : event.data?.toString?.() || event.toString();
+        handleRelayMessage(JSON.parse(data));
+      } catch {}
+    };
+
+    const onClose = () => {
+      connected = false;
+      relayConnectPending = false;
+      ws = null;
+      setTimeout(connectToRelay, 3000);
+    };
+
+    const onError = (err: any) => {
+      log(`Relay connection error: ${err?.message || 'unknown'}`);
+      connected = false;
+      relayConnectPending = false;
+      ws = null;
+    };
+
+    // Support both EventEmitter (ws package) and EventTarget (browser WebSocket) APIs
+    if (typeof ws.on === 'function') {
+      ws.on('open', onOpen);
+      ws.on('message', onMessage);
+      ws.on('close', onClose);
+      ws.on('error', onError);
+    } else {
+      ws.addEventListener('open', onOpen);
+      ws.addEventListener('message', onMessage);
+      ws.addEventListener('close', onClose);
+      ws.addEventListener('error', onError);
+    }
+  } catch (err: any) {
+    log(`Failed to create WebSocket: ${err?.message || 'unknown'}`);
+    relayConnectPending = false;
     setTimeout(connectToRelay, 3000);
   }
 }
 
 function updateProjectPathFromDevices() {
-  // Pick up our own project path from the device list (set by Electron app via relay)
   const self = devices.find((d: any) => d.name === DEVICE_NAME);
   if (self?.projectPath) {
     projectPath = self.projectPath;
@@ -95,7 +145,6 @@ function handleRelayMessage(msg: any) {
       updateProjectPathFromDevices();
       break;
     case 'prompt-inject':
-      // Prompt injections are handled by the Electron app's PTY, not here
       break;
   }
 }
@@ -104,7 +153,6 @@ function relaySend(data: any) {
   if (ws && connected) { try { ws.send(JSON.stringify(data)); } catch {} }
 }
 
-// Collect unread messages from other devices since last tool call
 function drainUnread(): string {
   const unread = conversationLog
     .slice(lastDeliveredIndex)
@@ -144,7 +192,6 @@ const TOOLS = [
 function handleTool(name: string, args: any): any {
   switch (name) {
     case 'cc_sync': {
-      // Also drain inbox file if it exists
       let inbox = '';
       if (projectPath) {
         const inboxPath = nodePath.join(projectPath, '.claude-connect-inbox');
@@ -192,14 +239,12 @@ function handleTool(name: string, args: any): any {
     case 'cc_push_files': {
       if (!projectPath) return { error: 'No project folder configured. Select a project folder in the Claude Connect app first.' };
       const syncId = `mcp-push-${Date.now()}`;
-      // Tell the local Electron app to initiate push (it has the file I/O)
       relaySend({ action: 'mcp-trigger-sync', direction: 'push', target: args.target, syncId, filePaths: args.files });
       return { success: true, syncId, message: `Push to ${args.target} triggered. The Claude Connect app is handling the file transfer.` };
     }
     case 'cc_pull_files': {
       if (!projectPath) return { error: 'No project folder configured. Select a project folder in the Claude Connect app first.' };
       const syncId = `mcp-pull-${Date.now()}`;
-      // Tell the local Electron app to initiate pull
       relaySend({ action: 'mcp-trigger-sync', direction: 'pull', target: args.target, syncId });
       return { success: true, syncId, message: `Pull from ${args.target} triggered. The Claude Connect app is handling the file transfer.` };
     }
@@ -221,7 +266,6 @@ function handleTool(name: string, args: any): any {
       let content = '';
       try { content = fs.readFileSync(inboxPath, 'utf8').trim(); } catch {}
       if (content) {
-        // Clear after reading
         try { fs.writeFileSync(inboxPath, ''); } catch {}
         return { inbox: content };
       }
@@ -232,7 +276,7 @@ function handleTool(name: string, args: any): any {
   }
 }
 
-// --- Stdio MCP Protocol (newline-delimited JSON) ---
+// --- Stdio MCP Protocol (newline-delimited JSON-RPC) ---
 
 function sendJsonRpc(obj: any) {
   process.stdout.write(JSON.stringify(obj) + '\n');
@@ -247,24 +291,42 @@ process.stdin.on('data', (chunk: string) => {
     const line = buf.slice(0, newlineIdx).replace(/\r$/, '');
     buf = buf.slice(newlineIdx + 1);
     if (!line) continue;
-    try { handleMessage(JSON.parse(line)); } catch {}
+    try {
+      handleMessage(JSON.parse(line));
+    } catch (err: any) {
+      log(`Failed to parse message: ${err?.message}`);
+    }
   }
 });
 
 function handleMessage(req: any) {
   const { id, method, params } = req;
 
-  // Notifications (no id) — just acknowledge
-  if (id === undefined || id === null) return;
+  // Notifications (no id) — acknowledge silently
+  if (id === undefined || id === null) {
+    if (method === 'notifications/initialized') {
+      log('Client initialized notification received');
+    }
+    return;
+  }
 
   switch (method) {
     case 'initialize':
       sendJsonRpc({ jsonrpc: '2.0', id, result: {
         protocolVersion: params?.protocolVersion || '2024-11-05',
-        capabilities: { tools: {} },
-        serverInfo: { name: 'claude-connect', version: '1.0.0' },
+        capabilities: {
+          tools: { listChanged: false },
+          resources: {},
+          prompts: {},
+        },
+        serverInfo: { name: 'claude-connect', version: '1.4.0' },
       }});
-      connectToRelay();
+      // Defer relay connection — don't block the health check handshake
+      setTimeout(() => connectToRelay(), 100);
+      break;
+
+    case 'ping':
+      sendJsonRpc({ jsonrpc: '2.0', id, result: {} });
       break;
 
     case 'tools/list':
@@ -281,9 +343,37 @@ function handleMessage(req: any) {
       break;
     }
 
+    case 'resources/list':
+      sendJsonRpc({ jsonrpc: '2.0', id, result: { resources: [] } });
+      break;
+
+    case 'prompts/list':
+      sendJsonRpc({ jsonrpc: '2.0', id, result: { prompts: [] } });
+      break;
+
     default:
       sendJsonRpc({ jsonrpc: '2.0', id, error: { code: -32601, message: `Unknown method: ${method}` } });
   }
 }
 
-process.on('SIGINT', () => { if (ws) { try { ws.close(); } catch {} } process.exit(0); });
+// Graceful shutdown
+process.on('SIGINT', () => {
+  if (ws) { try { ws.close(); } catch {} }
+  process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+  if (ws) { try { ws.close(); } catch {} }
+  process.exit(0);
+});
+
+// Only log real crashes, don't swallow silently
+process.on('uncaughtException', (err: any) => {
+  log(`Uncaught exception: ${err?.message || err}`);
+});
+
+process.on('unhandledRejection', (err: any) => {
+  log(`Unhandled rejection: ${err?.message || err}`);
+});
+
+log('MCP server starting...');

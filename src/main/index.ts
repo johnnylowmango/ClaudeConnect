@@ -3,9 +3,10 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { RelayServer } from '../server/relay';
 import { RelayClient } from '../server/client';
-import { DEFAULT_PORT } from '../shared/types';
+import { DEFAULT_PORT, ProjectEntry } from '../shared/types';
 import * as os from 'os';
 import { buildManifest, readFileChunked, receiveChunk, diffManifests } from './file-sync';
+import { WorkspaceManager } from './workspace-manager';
 import { v4 as uuid } from 'uuid';
 
 // node-pty is a native module — require it dynamically
@@ -20,22 +21,34 @@ let mainWindow: BrowserWindow | null = null;
 let server: RelayServer | null = null;
 let client: RelayClient | null = null;
 let mcpInstalled = false;
-let projectPath: string | null = null;
 let lastMcpDevice: string = '';
 let lastMcpRole: string = '';
 let lastMcpHost: string = '';
+
+// Workspace manager
+let workspace: WorkspaceManager | null = null;
+
+// Convenience: get current project path from workspace
+function getProjectPath(): string | null {
+  if (!workspace) return null;
+  return workspace.getActiveProjectPath(lastMcpDevice || os.hostname());
+}
 
 // Track active terminal processes
 const terminals: Map<number, any> = new Map();
 let nextTerminalId = 1;
 
 // Command Center: terminal binding + injection queue
-const deviceToTerminal: Map<string, number> = new Map();  // deviceName → terminalId
+const deviceToTerminal: Map<string, number> = new Map();
 const terminalIdleTimers: Map<number, NodeJS.Timeout> = new Map();
-const terminalIdle: Map<number, boolean> = new Map();  // terminalId → isIdle
+const terminalIdle: Map<number, boolean> = new Map();
 const injectionQueue: Map<number, Array<{ text: string; promptId: string }>> = new Map();
-const terminalOutputBuffers: Map<number, string> = new Map();  // for response capture
+const terminalOutputBuffers: Map<number, string> = new Map();
 const IDLE_TIMEOUT_MS = 2000;
+
+// File watcher for auto-sync
+let fileWatcher: fs.FSWatcher | null = null;
+let fileWatchDebounce: NodeJS.Timeout | null = null;
 
 function markTerminalBusy(termId: number) {
   terminalIdle.set(termId, false);
@@ -59,7 +72,6 @@ function processInjectionQueue(termId: number) {
   terminalIdle.set(termId, false);
   term.write(next.text + '\n');
 
-  // Notify renderer that injection happened
   mainWindow?.webContents.send('command-injected', {
     termId, promptId: next.promptId, text: next.text,
   });
@@ -68,7 +80,6 @@ function processInjectionQueue(termId: number) {
 function injectIntoTerminal(termId: number, text: string, promptId: string) {
   const idle = terminalIdle.get(termId);
   if (idle) {
-    // Inject immediately
     const term = terminals.get(termId);
     if (!term) return;
     terminalIdle.set(termId, false);
@@ -77,7 +88,6 @@ function injectIntoTerminal(termId: number, text: string, promptId: string) {
       termId, promptId, text,
     });
   } else {
-    // Queue it
     if (!injectionQueue.has(termId)) injectionQueue.set(termId, []);
     injectionQueue.get(termId)!.push({ text, promptId });
   }
@@ -85,17 +95,11 @@ function injectIntoTerminal(termId: number, text: string, promptId: string) {
 
 function stripAnsi(text: string): string {
   return text
-    // CSI sequences (e.g. \x1b[0m, \x1b[?2026h, \x1b[38;2;...m)
     .replace(/\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]/g, '')
-    // OSC sequences (e.g. \x1b]0;title\x07)
     .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
-    // Other escape sequences (2-char)
     .replace(/\x1b[^[\]]/g, '')
-    // Carriage returns
     .replace(/\r/g, '')
-    // Strip lines that are just box-drawing or whitespace
     .replace(/^[─━═╔╗╚╝║╠╣╬┌┐└┘├┤┬┴┼│─\s]+$/gm, '')
-    // Collapse multiple blank lines
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
@@ -108,24 +112,20 @@ function getClaudeConfigPath(): string {
 
 function getMcpServerPath(): string {
   if (app.isPackaged) {
-    // MCP server is unpacked from asar so plain `node` can run it
     return path.join(process.resourcesPath, 'app.asar.unpacked', 'dist', 'mcp', 'server.js');
   }
   return path.join(__dirname, '..', 'mcp', 'server.js');
 }
 
 function getNodePath(): string {
-  // Find the full path to node so MCP works regardless of shell PATH
   const candidates = [
     '/opt/homebrew/bin/node',
     '/usr/local/bin/node',
     '/usr/bin/node',
-    // Windows
     'C:\\Program Files\\nodejs\\node.exe',
     'C:\\Program Files (x86)\\nodejs\\node.exe',
   ];
 
-  // Check PATH-resolved node first
   const { execSync } = require('child_process');
   try {
     const resolved = execSync(process.platform === 'win32' ? 'where node' : 'which node', { encoding: 'utf8' }).trim().split('\n')[0];
@@ -135,14 +135,15 @@ function getNodePath(): string {
   for (const p of candidates) {
     if (fs.existsSync(p)) return p;
   }
-  return 'node'; // fallback
+  return 'node';
 }
 
 function installMcpConfig(deviceName: string, role: string, host: string) {
-  // Remember params so we can re-install when project folder changes
   lastMcpDevice = deviceName || os.hostname();
   lastMcpRole = role || '';
   lastMcpHost = host || 'localhost';
+
+  const projectPath = getProjectPath();
 
   try {
     const configPath = getClaudeConfigPath();
@@ -175,16 +176,13 @@ function installMcpConfig(deviceName: string, role: string, host: string) {
 
 function uninstallMcpConfig() {
   if (!mcpInstalled) return;
-
   try {
     const configPath = getClaudeConfigPath();
     if (!fs.existsSync(configPath)) return;
-
     const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
     if (config.mcpServers && config.mcpServers['claude-connect']) {
       delete config.mcpServers['claude-connect'];
       fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
-      console.log('MCP config removed');
     }
     mcpInstalled = false;
   } catch (err) {
@@ -202,44 +200,27 @@ function setupAutoUpdater() {
     autoUpdater.autoInstallOnAppQuit = true;
 
     autoUpdater.on('update-available', (info: any) => {
-      mainWindow?.webContents.send('updater-event', {
-        event: 'update-available',
-        version: info.version,
-      });
+      mainWindow?.webContents.send('updater-event', { event: 'update-available', version: info.version });
     });
 
     autoUpdater.on('update-not-available', () => {
-      mainWindow?.webContents.send('updater-event', {
-        event: 'update-not-available',
-      });
+      mainWindow?.webContents.send('updater-event', { event: 'update-not-available' });
     });
 
     autoUpdater.on('download-progress', (progress: any) => {
-      mainWindow?.webContents.send('updater-event', {
-        event: 'download-progress',
-        percent: Math.round(progress.percent),
-      });
+      mainWindow?.webContents.send('updater-event', { event: 'download-progress', percent: Math.round(progress.percent) });
     });
 
     autoUpdater.on('update-downloaded', () => {
-      mainWindow?.webContents.send('updater-event', {
-        event: 'update-downloaded',
-      });
+      mainWindow?.webContents.send('updater-event', { event: 'update-downloaded' });
     });
 
     autoUpdater.on('error', (err: any) => {
-      mainWindow?.webContents.send('updater-event', {
-        event: 'error',
-        error: err.message,
-      });
+      mainWindow?.webContents.send('updater-event', { event: 'error', error: err.message });
     });
 
-    // Check for updates after a short delay
-    setTimeout(() => {
-      autoUpdater.checkForUpdates().catch(() => {});
-    }, 5000);
+    setTimeout(() => { autoUpdater.checkForUpdates().catch(() => {}); }, 5000);
 
-    // IPC handlers for updates
     ipcMain.handle('check-for-updates', async () => {
       try {
         const result = await autoUpdater.checkForUpdates();
@@ -250,12 +231,8 @@ function setupAutoUpdater() {
     });
 
     ipcMain.handle('download-update', async () => {
-      try {
-        await autoUpdater.downloadUpdate();
-        return { success: true };
-      } catch (err: any) {
-        return { success: false, error: err.message };
-      }
+      try { await autoUpdater.downloadUpdate(); return { success: true }; }
+      catch (err: any) { return { success: false, error: err.message }; }
     });
 
     ipcMain.handle('install-update', async () => {
@@ -271,11 +248,12 @@ function setupAutoUpdater() {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1100,
-    height: 750,
-    minWidth: 700,
-    minHeight: 500,
+    width: 1200,
+    height: 800,
+    minWidth: 800,
+    minHeight: 600,
     title: 'Claude Connect',
+    frame: true,
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,
@@ -288,23 +266,22 @@ function createWindow() {
     mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
   }
 
-  mainWindow.on('closed', () => {
-    mainWindow = null;
-  });
+  mainWindow.on('closed', () => { mainWindow = null; });
 }
 
 app.whenReady().then(() => {
+  // Initialize workspace
+  workspace = new WorkspaceManager();
   createWindow();
   setupAutoUpdater();
 });
 
 app.on('window-all-closed', () => {
-  // Kill all terminal processes
   for (const [, term] of terminals) {
     try { term.kill(); } catch {}
   }
   terminals.clear();
-
+  stopFileWatcher();
   server?.stop();
   client?.disconnect();
   uninstallMcpConfig();
@@ -316,8 +293,66 @@ app.on('before-quit', () => {
     try { term.kill(); } catch {}
   }
   terminals.clear();
+  stopFileWatcher();
   uninstallMcpConfig();
 });
+
+// --- File Watcher for auto-sync ---
+
+function startFileWatcher() {
+  stopFileWatcher();
+  const projectPath = getProjectPath();
+  if (!projectPath || !client) return;
+
+  try {
+    fileWatcher = fs.watch(projectPath, { recursive: true }, (eventType, filename) => {
+      if (!filename) return;
+      // Skip ignored patterns
+      const parts = filename.split(path.sep);
+      const IGNORE = ['node_modules', '.git', 'dist', 'build', '.DS_Store', '.claude-connect-inbox'];
+      if (parts.some(p => IGNORE.includes(p))) return;
+      if (filename.endsWith('.log') || filename.endsWith('.lock') || filename.endsWith('.map')) return;
+
+      // Debounce
+      if (fileWatchDebounce) clearTimeout(fileWatchDebounce);
+      fileWatchDebounce = setTimeout(() => {
+        autoSyncChangedFiles();
+      }, 1000);
+    });
+  } catch (err) {
+    console.error('File watcher failed:', err);
+  }
+}
+
+function stopFileWatcher() {
+  if (fileWatcher) {
+    fileWatcher.close();
+    fileWatcher = null;
+  }
+  if (fileWatchDebounce) {
+    clearTimeout(fileWatchDebounce);
+    fileWatchDebounce = null;
+  }
+}
+
+function autoSyncChangedFiles() {
+  const projectPath = getProjectPath();
+  if (!projectPath || !client) return;
+
+  // Push to all connected devices
+  const syncId = uuid();
+  const manifest = buildManifest(projectPath);
+  // Find all online devices that are not us
+  // We broadcast a sync request; the relay will route it
+  client.requestFileSync('__all__', syncId, manifest, 'push');
+
+  mainWindow?.webContents.send('command-event', {
+    id: `evt-${Date.now()}`,
+    type: 'sync',
+    text: 'Auto-syncing file changes to connected devices...',
+    timestamp: Date.now(),
+  });
+}
 
 // --- Terminal IPC ---
 
@@ -330,10 +365,8 @@ ipcMain.handle('terminal-create', async (_, cwd?: string) => {
   const isWin = process.platform === 'win32';
   const shell = isWin ? 'powershell.exe' : (process.env.SHELL || '/bin/zsh');
 
-  // Build env with proper PATH for both platforms
   const env: Record<string, string> = { ...process.env } as any;
   if (isWin) {
-    // Windows: ensure common paths for node/claude are available
     const extraPaths = [
       path.join(os.homedir(), 'AppData', 'Roaming', 'npm'),
       path.join(os.homedir(), '.local', 'bin'),
@@ -350,6 +383,7 @@ ipcMain.handle('terminal-create', async (_, cwd?: string) => {
     env.TERM = 'xterm-256color';
   }
 
+  const projectPath = getProjectPath();
   const term = pty.spawn(shell, isWin ? ['-NoLogo'] : ['-l'], {
     name: 'xterm-256color',
     cols: 120,
@@ -362,18 +396,12 @@ ipcMain.handle('terminal-create', async (_, cwd?: string) => {
 
   term.onData((data: string) => {
     mainWindow?.webContents.send('terminal-data', { id, data });
-    // Track idle state for injection queue
     markTerminalBusy(id);
-    // Buffer output for Command Center response streaming
     const existing = terminalOutputBuffers.get(id) || '';
     terminalOutputBuffers.set(id, existing + data);
-    // Send stripped output to Command Center (debounced to reduce noise)
     const stripped = stripAnsi(data);
     if (stripped.trim() && stripped.length > 1) {
-      mainWindow?.webContents.send('command-terminal-output', {
-        termId: id, text: stripped,
-      });
-      // Also relay to other machines so their Command Center sees our output
+      mainWindow?.webContents.send('command-terminal-output', { termId: id, text: stripped });
       if (client && deviceToTerminal.has(lastMcpDevice)) {
         const boundId = deviceToTerminal.get(lastMcpDevice);
         if (boundId === id) {
@@ -392,7 +420,6 @@ ipcMain.handle('terminal-create', async (_, cwd?: string) => {
     const timer = terminalIdleTimers.get(id);
     if (timer) clearTimeout(timer);
     terminalIdleTimers.delete(id);
-    // Remove from deviceToTerminal
     for (const [dev, tid] of deviceToTerminal) {
       if (tid === id) { deviceToTerminal.delete(dev); break; }
     }
@@ -403,29 +430,19 @@ ipcMain.handle('terminal-create', async (_, cwd?: string) => {
 
 ipcMain.handle('terminal-write', async (_, id: number, data: string) => {
   const term = terminals.get(id);
-  if (term) {
-    term.write(data);
-    return { success: true };
-  }
+  if (term) { term.write(data); return { success: true }; }
   return { success: false, error: 'Terminal not found' };
 });
 
 ipcMain.handle('terminal-resize', async (_, id: number, cols: number, rows: number) => {
   const term = terminals.get(id);
-  if (term) {
-    term.resize(cols, rows);
-    return { success: true };
-  }
+  if (term) { term.resize(cols, rows); return { success: true }; }
   return { success: false, error: 'Terminal not found' };
 });
 
 ipcMain.handle('terminal-kill', async (_, id: number) => {
   const term = terminals.get(id);
-  if (term) {
-    term.kill();
-    terminals.delete(id);
-    return { success: true };
-  }
+  if (term) { term.kill(); terminals.delete(id); return { success: true }; }
   return { success: false, error: 'Terminal not found' };
 });
 
@@ -433,7 +450,7 @@ ipcMain.handle('terminal-kill', async (_, id: number) => {
 
 ipcMain.handle('bind-terminal-device', async (_, terminalId: number, devName: string) => {
   deviceToTerminal.set(devName, terminalId);
-  terminalIdle.set(terminalId, true);  // assume idle initially
+  terminalIdle.set(terminalId, true);
   return { success: true };
 });
 
@@ -470,37 +487,32 @@ ipcMain.handle('get-bound-terminals', async () => {
 // --- File sync event handling ---
 
 function handleFileSyncEvent(event: string, data: any) {
+  const projectPath = getProjectPath();
   if (!projectPath || !client) return;
 
   switch (event) {
     case 'file-sync-request': {
-      // Another device wants to sync with us
       if (data.direction === 'push' && data.filePaths) {
-        // They will push files to us — nothing to do, chunks will arrive
         mainWindow?.webContents.send('file-sync-progress', {
           syncId: data.syncId, phase: 'transferring',
           totalFiles: data.filePaths?.length || 0, completedFiles: 0,
         });
       } else if (data.direction === 'pull') {
-        // They want our files — compare manifests and send diffs
         const localManifest = buildManifest(projectPath);
         const remoteManifest = data.manifest || [];
         const { toPush } = diffManifests(localManifest, remoteManifest);
 
-        let completed = 0;
         for (const filePath of toPush) {
           const chunks = readFileChunked(projectPath, filePath, data.syncId);
           for (const chunk of chunks) {
             client.sendFileChunk(data.from, chunk);
           }
-          completed++;
         }
         client.reportFileSyncStatus(data.from, {
           syncId: data.syncId, phase: 'done',
           totalFiles: toPush.length, completedFiles: toPush.length,
         });
       } else if (data.direction === 'push' && !data.filePaths) {
-        // They sent their manifest for comparison — send ours back
         const localManifest = buildManifest(projectPath);
         client.sendManifestResponse(data.from, data.syncId, localManifest);
       }
@@ -508,7 +520,6 @@ function handleFileSyncEvent(event: string, data: any) {
     }
 
     case 'file-chunk': {
-      // Incoming file chunk — reassemble
       const done = receiveChunk(projectPath, data.chunk);
       if (done) {
         mainWindow?.webContents.send('file-sync-progress', {
@@ -518,6 +529,16 @@ function handleFileSyncEvent(event: string, data: any) {
           completedFiles: 1,
           totalFiles: 1,
         });
+        // Update sync state
+        if (workspace) {
+          const activeProject = workspace.getActiveProject();
+          if (activeProject) {
+            workspace.updateDeviceState(activeProject.id, lastMcpDevice, {
+              lastSynced: Date.now(),
+              status: 'synced',
+            });
+          }
+        }
       }
       break;
     }
@@ -528,7 +549,6 @@ function handleFileSyncEvent(event: string, data: any) {
     }
 
     case 'file-manifest-response': {
-      // Got remote manifest — compute diff and report
       const localManifest = buildManifest(projectPath);
       const diff = diffManifests(localManifest, data.manifest || []);
       mainWindow?.webContents.send('file-manifest-diff', {
@@ -541,25 +561,20 @@ function handleFileSyncEvent(event: string, data: any) {
     }
 
     case 'mcp-trigger-sync': {
-      // MCP server asked us to do a sync — we have the filesystem access
       if (data.direction === 'push') {
         const manifest = buildManifest(projectPath);
         if (data.filePaths && data.filePaths.length > 0) {
-          // Push specific files
-          let completed = 0;
           for (const filePath of data.filePaths) {
             const chunks = readFileChunked(projectPath, filePath, data.syncId);
             for (const chunk of chunks) {
               client!.sendFileChunk(data.target, chunk);
             }
-            completed++;
           }
           mainWindow?.webContents.send('file-sync-progress', {
             syncId: data.syncId, phase: 'done',
             totalFiles: data.filePaths.length, completedFiles: data.filePaths.length,
           });
         } else {
-          // Push all changed files — request remote manifest first
           client!.requestFileSync(data.target, data.syncId, manifest, 'push');
         }
       } else if (data.direction === 'pull') {
@@ -587,9 +602,10 @@ function notifyTerminal(from: string, type: string, content: string) {
   mainWindow?.webContents.send('terminal-data', { id: latestId, data: notification });
 }
 
-// --- Inbox file — write incoming messages/tasks so Claude reads them as project context ---
+// --- Inbox file ---
 
 function writeToInbox(entry: { from: string; type: string; time: string; content: string }) {
+  const projectPath = getProjectPath();
   if (!projectPath) return;
   const inboxPath = path.join(projectPath, '.claude-connect-inbox');
 
@@ -602,6 +618,7 @@ function writeToInbox(entry: { from: string; type: string; time: string; content
 }
 
 function clearInbox() {
+  const projectPath = getProjectPath();
   if (!projectPath) return;
   const inboxPath = path.join(projectPath, '.claude-connect-inbox');
   try { fs.writeFileSync(inboxPath, ''); } catch {}
@@ -612,7 +629,7 @@ function setupClientEventHandler(c: RelayClient) {
     mainWindow?.webContents.send('client-event', { event, data });
     handleFileSyncEvent(event, data);
 
-    // Incoming message from another device → write to inbox + terminal notification
+    // Incoming message → inbox + terminal notification
     if (event === 'message' && data.from !== lastMcpDevice) {
       const content = data.payload?.text || data.payload?.summary || '';
       if (content) {
@@ -626,7 +643,7 @@ function setupClientEventHandler(c: RelayClient) {
       }
     }
 
-    // Incoming task → write to inbox
+    // Incoming task → inbox
     if (event === 'task-update' && data.createdBy !== lastMcpDevice && data.status === 'pending') {
       writeToInbox({
         from: data.createdBy,
@@ -636,7 +653,7 @@ function setupClientEventHandler(c: RelayClient) {
       });
     }
 
-    // Auto-inject incoming messages into local Claude terminal (Command Center feature)
+    // Auto-inject incoming messages into Claude terminal
     if (event === 'message' && data.from !== lastMcpDevice) {
       const content = data.payload?.text || data.payload?.summary || '';
       if (content) {
@@ -654,13 +671,13 @@ function setupClientEventHandler(c: RelayClient) {
       }
     }
 
-    // Auto-pull files when a work-update arrives with filesChanged
+    // Auto-pull files when work-update arrives
     if (event === 'message' && data.type === 'work-update' && data.from !== lastMcpDevice) {
       const filesChanged = data.payload?.filesChanged;
+      const projectPath = getProjectPath();
       if (filesChanged && filesChanged.length > 0 && projectPath && client) {
         const syncId = uuid();
-        const { buildManifest: bm } = require('./file-sync');
-        const manifest = bm(projectPath);
+        const manifest = buildManifest(projectPath);
         client.requestFileSync(data.from, syncId, manifest, 'pull');
         mainWindow?.webContents.send('command-event', {
           id: `evt-${Date.now()}`,
@@ -671,7 +688,7 @@ function setupClientEventHandler(c: RelayClient) {
       }
     }
 
-    // Handle remote terminal output — show in local Command Center
+    // Remote terminal output → Command Center
     if (event === 'terminal-output' && data.from !== lastMcpDevice) {
       mainWindow?.webContents.send('command-remote-output', {
         deviceName: data.from,
@@ -679,19 +696,48 @@ function setupClientEventHandler(c: RelayClient) {
       });
     }
 
-    // Handle prompt-inject from remote device (cross-machine prompt injection)
+    // Prompt injection from remote device
     if (event === 'prompt-inject') {
       const localTermId = deviceToTerminal.get(lastMcpDevice);
       if (localTermId !== undefined && terminals.has(localTermId)) {
-        const injectionText = `[${data.from} says]: ${data.text}`;
-        injectIntoTerminal(localTermId, injectionText, data.promptId || `remote-${Date.now()}`);
+        injectIntoTerminal(localTermId, data.text, data.promptId || `remote-${Date.now()}`);
         mainWindow?.webContents.send('command-event', {
           id: `evt-${Date.now()}`,
           type: 'info',
-          text: `Prompt injected from ${data.from}`,
+          text: `Prompt from ${data.from}`,
           timestamp: Date.now(),
         });
       }
+    }
+
+    // Project created on remote device — auto-create locally
+    if (event === 'project-created' && workspace) {
+      const project: ProjectEntry = data;
+      workspace.registerRemoteProject(project, lastMcpDevice || os.hostname());
+      mainWindow?.webContents.send('workspace-event', { event: 'project-created', project });
+      mainWindow?.webContents.send('command-event', {
+        id: `evt-${Date.now()}`,
+        type: 'info',
+        text: `Project "${project.name}" created — synced locally`,
+        timestamp: Date.now(),
+      });
+    }
+
+    // Project list from relay
+    if (event === 'project-list' && workspace) {
+      const projects: ProjectEntry[] = data;
+      for (const p of projects) {
+        workspace.registerRemoteProject(p, lastMcpDevice || os.hostname());
+      }
+      mainWindow?.webContents.send('workspace-event', { event: 'project-list', projects: workspace.listProjects() });
+    }
+
+    // Welcome — sync projects from host
+    if (event === 'welcome' && workspace && data.projects) {
+      for (const p of data.projects) {
+        workspace.registerRemoteProject(p, lastMcpDevice || os.hostname());
+      }
+      mainWindow?.webContents.send('workspace-event', { event: 'project-list', projects: workspace.listProjects() });
     }
   });
 }
@@ -704,6 +750,12 @@ ipcMain.handle('start-server', async (_, port?: number, deviceName?: string, rol
     server.setEventHandler((event, data) => {
       mainWindow?.webContents.send('server-event', { event, data });
     });
+
+    // Share workspace projects with relay
+    if (workspace) {
+      server.setProjects(workspace.listProjects());
+    }
+
     await server.start();
 
     client = new RelayClient(deviceName || os.hostname(), process.platform);
@@ -712,6 +764,14 @@ ipcMain.handle('start-server', async (_, port?: number, deviceName?: string, rol
 
     installMcpConfig(deviceName || os.hostname(), role || 'host', 'localhost');
 
+    // Sync project list to relay
+    if (workspace && client) {
+      client.syncProjectList(workspace.listProjects());
+    }
+
+    // Start file watcher
+    startFileWatcher();
+
     return { success: true, port: port || DEFAULT_PORT };
   } catch (err: any) {
     return { success: false, error: err.message };
@@ -719,6 +779,7 @@ ipcMain.handle('start-server', async (_, port?: number, deviceName?: string, rol
 });
 
 ipcMain.handle('stop-server', async () => {
+  stopFileWatcher();
   client?.disconnect();
   client = null;
   server?.stop();
@@ -735,6 +796,14 @@ ipcMain.handle('connect-to-server', async (_, host: string, port: number, device
 
     installMcpConfig(deviceName || os.hostname(), role || 'client', host);
 
+    // Sync project list
+    if (workspace && client) {
+      client.syncProjectList(workspace.listProjects());
+    }
+
+    // Start file watcher
+    startFileWatcher();
+
     return { success: true };
   } catch (err: any) {
     return { success: false, error: err.message };
@@ -742,6 +811,7 @@ ipcMain.handle('connect-to-server', async (_, host: string, port: number, device
 });
 
 ipcMain.handle('disconnect', async () => {
+  stopFileWatcher();
   client?.disconnect();
   client = null;
   uninstallMcpConfig();
@@ -795,11 +865,101 @@ ipcMain.handle('get-connection-info', async () => {
   };
 });
 
-// --- Project Folder IPC ---
+// --- Workspace IPC ---
+
+ipcMain.handle('workspace-get', async () => {
+  if (!workspace) return { root: null, projects: [], activeProjectId: null };
+  return {
+    root: workspace.getRoot(),
+    projects: workspace.listProjects(),
+    activeProjectId: workspace.getActiveProject()?.id || null,
+  };
+});
+
+ipcMain.handle('workspace-create-project', async (_, name: string) => {
+  if (!workspace) return { success: false, error: 'Workspace not initialized' };
+  try {
+    const deviceName = lastMcpDevice || os.hostname();
+    const project = workspace.createProject(name, deviceName);
+
+    // Broadcast to connected devices
+    if (client) {
+      client.broadcastProjectCreate(project);
+    }
+
+    // Write CLAUDE.md
+    const projectPath = workspace.getActiveProjectPath(deviceName);
+    if (projectPath) {
+      writeProjectClaudeMd(projectPath);
+    }
+
+    // Update MCP config with new project path
+    if (mcpInstalled) {
+      installMcpConfig(lastMcpDevice, lastMcpRole, lastMcpHost);
+    }
+
+    // Restart file watcher
+    startFileWatcher();
+
+    // Notify relay of project change
+    if (client && projectPath) {
+      client.setProject(projectPath, project.id, project.name);
+    }
+
+    return { success: true, project };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('workspace-switch-project', async (_, projectId: string) => {
+  if (!workspace) return { success: false, error: 'Workspace not initialized' };
+
+  const project = workspace.switchProject(projectId);
+  if (!project) return { success: false, error: 'Project not found' };
+
+  const deviceName = lastMcpDevice || os.hostname();
+  const projectPath = workspace.getActiveProjectPath(deviceName);
+
+  // Update MCP config
+  if (mcpInstalled && projectPath) {
+    installMcpConfig(lastMcpDevice, lastMcpRole, lastMcpHost);
+  }
+
+  // Write CLAUDE.md if needed
+  if (projectPath) {
+    writeProjectClaudeMd(projectPath);
+  }
+
+  // Restart file watcher for new project
+  startFileWatcher();
+
+  // Notify relay
+  if (client && projectPath) {
+    client.switchProject(project.id, project.name, projectPath);
+  }
+
+  return { success: true, project, projectPath };
+});
+
+ipcMain.handle('workspace-delete-project', async (_, projectId: string, removeFiles: boolean) => {
+  if (!workspace) return { success: false, error: 'Workspace not initialized' };
+  const result = workspace.deleteProject(projectId, removeFiles);
+  if (result) {
+    startFileWatcher(); // restart on new active project
+  }
+  return { success: result };
+});
+
+ipcMain.handle('workspace-set-root', async (_, newRoot: string) => {
+  workspace = new WorkspaceManager(newRoot);
+  return { success: true, root: workspace.getRoot() };
+});
+
+// --- Legacy Project Folder IPC (kept for compatibility) ---
 
 function writeProjectClaudeMd(folder: string) {
   const claudeMdPath = path.join(folder, 'CLAUDE.md');
-  // Don't overwrite if user has customized it (check for our marker)
   if (fs.existsSync(claudeMdPath)) {
     const existing = fs.readFileSync(claudeMdPath, 'utf8');
     if (!existing.includes('<!-- claude-connect-auto -->')) return;
@@ -841,18 +1001,6 @@ You are one brain across multiple machines. The user should NEVER have to type s
   console.log('CLAUDE.md written to project folder');
 }
 
-function applyProjectPath(newPath: string) {
-  projectPath = newPath;
-  // Tell relay so other devices see our project path
-  client?.setProject(projectPath);
-  // Re-write MCP config so new Claude sessions get the project env var
-  if (mcpInstalled) {
-    installMcpConfig(lastMcpDevice, lastMcpRole, lastMcpHost);
-  }
-  // Write CLAUDE.md with auto-sync instructions
-  writeProjectClaudeMd(newPath);
-}
-
 ipcMain.handle('select-project-folder', async () => {
   if (!mainWindow) return { success: false, error: 'No window' };
   const result = await dialog.showOpenDialog(mainWindow, {
@@ -862,11 +1010,13 @@ ipcMain.handle('select-project-folder', async () => {
   if (result.canceled || !result.filePaths[0]) {
     return { success: false };
   }
-  applyProjectPath(result.filePaths[0]);
-  return { success: true, path: projectPath };
+  const folderPath = result.filePaths[0];
+  writeProjectClaudeMd(folderPath);
+  return { success: true, path: folderPath };
 });
 
 ipcMain.handle('get-project-folder', async () => {
+  const projectPath = getProjectPath();
   return { path: projectPath };
 });
 
@@ -876,13 +1026,20 @@ ipcMain.handle('clear-inbox', async () => {
 });
 
 ipcMain.handle('set-project-folder', async (_, folderPath: string) => {
-  applyProjectPath(folderPath);
-  return { success: true, path: projectPath };
+  writeProjectClaudeMd(folderPath);
+  if (client) {
+    client.setProject(folderPath);
+  }
+  if (mcpInstalled) {
+    installMcpConfig(lastMcpDevice, lastMcpRole, lastMcpHost);
+  }
+  return { success: true, path: folderPath };
 });
 
 // --- File Sync IPC ---
 
 ipcMain.handle('get-file-manifest', async () => {
+  const projectPath = getProjectPath();
   if (!projectPath) return { success: false, error: 'No project folder selected' };
   try {
     const manifest = buildManifest(projectPath);
@@ -893,15 +1050,13 @@ ipcMain.handle('get-file-manifest', async () => {
 });
 
 ipcMain.handle('push-files', async (_, target: string, filePaths?: string[]) => {
+  const projectPath = getProjectPath();
   if (!projectPath || !client) return { success: false, error: 'Not ready' };
   try {
     const syncId = uuid();
     const manifest = buildManifest(projectPath);
-
-    // Send sync request with our manifest
     client.requestFileSync(target, syncId, manifest, 'push', filePaths);
 
-    // If specific files requested, send them now
     if (filePaths && filePaths.length > 0) {
       let completed = 0;
       for (const filePath of filePaths) {
@@ -921,7 +1076,6 @@ ipcMain.handle('push-files', async (_, target: string, filePaths?: string[]) => 
         totalFiles: filePaths.length, completedFiles: filePaths.length,
       });
     }
-
     return { success: true, syncId };
   } catch (err: any) {
     return { success: false, error: err.message };
@@ -929,6 +1083,7 @@ ipcMain.handle('push-files', async (_, target: string, filePaths?: string[]) => 
 });
 
 ipcMain.handle('pull-files', async (_, target: string) => {
+  const projectPath = getProjectPath();
   if (!projectPath || !client) return { success: false, error: 'Not ready' };
   try {
     const syncId = uuid();
@@ -941,11 +1096,11 @@ ipcMain.handle('pull-files', async (_, target: string) => {
 });
 
 ipcMain.handle('compare-manifests', async (_, target: string) => {
+  const projectPath = getProjectPath();
   if (!projectPath || !client) return { success: false, error: 'Not ready' };
   try {
     const syncId = uuid();
     const manifest = buildManifest(projectPath);
-    // Request remote manifest for comparison
     client.requestFileSync(target, syncId, manifest, 'push');
     return { success: true, syncId, localManifest: manifest };
   } catch (err: any) {
