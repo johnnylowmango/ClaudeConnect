@@ -417,23 +417,29 @@ export default function App() {
     const result = await ipcRenderer.invoke('terminal-create', projectInfo?.path || undefined);
     if (result.success) {
       termIdRef.current = result.id;
+      // Use the SAME name that was registered with the relay so lookups match
       const myName = deviceName || connectionInfo?.hostname || 'local';
       localDeviceName.current = myName;
+
+      // Bind terminal to our device name AND all possible name variants
       boundTerminals.current.set(myName, result.id);
+      if (connectionInfo?.hostname && connectionInfo.hostname !== myName) {
+        boundTerminals.current.set(connectionInfo.hostname, result.id);
+      }
       await ipcRenderer.invoke('bind-terminal-device', result.id, myName);
 
       // cd to project folder first, then launch claude
       if (projectInfo?.path) {
-        const cdCmd = navigator.platform.startsWith('Win')
-          ? `cd "${projectInfo.path}"\n`
-          : `cd "${projectInfo.path}"\n`;
-        await ipcRenderer.invoke('terminal-write', result.id, cdCmd);
-        // Small delay to let cd complete before launching claude
-        await new Promise(r => setTimeout(r, 300));
+        await ipcRenderer.invoke('terminal-write', result.id, `cd "${projectInfo.path}"\n`);
+        await new Promise(r => setTimeout(r, 500));
       }
       await ipcRenderer.invoke('terminal-write', result.id, 'claude\n');
       setClaudeLaunched(true);
 
+      // Show terminal so user can see Claude launching
+      setTerminalVisible(true);
+
+      // Select all online devices as targets
       const allOnline = devices.filter(d => d.status === 'online').map(d => d.name);
       if (!allOnline.includes(myName)) allOnline.push(myName);
       setSelectedTargets(allOnline);
@@ -465,10 +471,24 @@ export default function App() {
     }]);
 
     for (const target of selectedTargets) {
-      const termId = boundTerminals.current.get(target);
+      // Check if this target has a local terminal bound
+      let termId = boundTerminals.current.get(target);
+
+      // If not found by exact name, check if it's our local device under any name
+      if (termId === undefined && termIdRef.current !== null) {
+        const isLocal = target === localDeviceName.current
+          || target === connectionInfo?.hostname
+          || target === deviceName;
+        if (isLocal) {
+          termId = termIdRef.current;
+        }
+      }
+
       if (termId !== undefined) {
+        // Inject directly into local Claude terminal
         await ipcRenderer.invoke('inject-prompt', termId, text, promptId);
       } else {
+        // Send to remote device via relay
         await ipcRenderer.invoke('send-prompt-inject', target, text, promptId);
       }
     }
