@@ -412,13 +412,25 @@ export default function App() {
       termIdRef.current = null;
     }
 
-    const result = await ipcRenderer.invoke('terminal-create');
+    // Get the active project path so Claude launches in the right directory
+    const projectInfo = await ipcRenderer.invoke('get-project-folder');
+    const result = await ipcRenderer.invoke('terminal-create', projectInfo?.path || undefined);
     if (result.success) {
       termIdRef.current = result.id;
       const myName = deviceName || connectionInfo?.hostname || 'local';
       localDeviceName.current = myName;
       boundTerminals.current.set(myName, result.id);
       await ipcRenderer.invoke('bind-terminal-device', result.id, myName);
+
+      // cd to project folder first, then launch claude
+      if (projectInfo?.path) {
+        const cdCmd = navigator.platform.startsWith('Win')
+          ? `cd "${projectInfo.path}"\n`
+          : `cd "${projectInfo.path}"\n`;
+        await ipcRenderer.invoke('terminal-write', result.id, cdCmd);
+        // Small delay to let cd complete before launching claude
+        await new Promise(r => setTimeout(r, 300));
+      }
       await ipcRenderer.invoke('terminal-write', result.id, 'claude\n');
       setClaudeLaunched(true);
 
@@ -442,7 +454,7 @@ export default function App() {
   };
 
   const handleCommandSend = async () => {
-    if (!commandInput.trim() || selectedTargets.length === 0) return;
+    if (!commandInput.trim() || !canSend) return;
     const text = commandInput.trim();
     const promptId = `prompt-${Date.now()}`;
     setCommandInput('');
@@ -474,6 +486,10 @@ export default function App() {
 
   const onlineDevices = devices.filter(d => d.status === 'online');
   const activeProject = projects.find(p => p.id === activeProjectId);
+  // Can send if: local Claude is running OR there are remote targets selected
+  const hasLocalClaude = claudeLaunched;
+  const hasRemoteTargets = selectedTargets.some(t => t !== localDeviceName.current);
+  const canSend = (hasLocalClaude || hasRemoteTargets) && selectedTargets.length > 0;
 
   // ===================== SETUP SCREEN =====================
   if (mode === 'idle') {
@@ -746,24 +762,22 @@ export default function App() {
             <div className="command-stream">
               {commandEntries.length === 0 ? (
                 <div className="command-empty">
-                  {!claudeLaunched ? (
-                    <div className="empty-state">
-                      <div className="empty-icon">{'{ }'}</div>
-                      <h2>Ready to go</h2>
-                      {activeProject ? (
-                        <p>Project <strong>{activeProject.name}</strong> is active. Click <strong>Launch Claude</strong> to start working.</p>
-                      ) : (
-                        <p>Create or select a project, then <strong>Launch Claude</strong> to start.</p>
-                      )}
-                      <button className="btn btn-primary" onClick={handleLaunchClaude}>Launch Claude</button>
-                    </div>
-                  ) : (
-                    <div className="empty-state">
-                      <div className="empty-icon">~</div>
-                      <h2>Claude is running</h2>
+                  <div className="empty-state">
+                    <div className="empty-icon">{'{ }'}</div>
+                    <h2>{claudeLaunched ? 'Claude is running' : 'Ready to go'}</h2>
+                    {activeProject && !claudeLaunched && (
+                      <p>Project <strong>{activeProject.name}</strong> is active.</p>
+                    )}
+                    {!claudeLaunched && (
+                      <>
+                        <p>Launch Claude on this machine to start working, or select a remote device to send prompts there.</p>
+                        <button className="btn btn-primary" onClick={handleLaunchClaude}>Launch Claude</button>
+                      </>
+                    )}
+                    {claudeLaunched && (
                       <p>Select target device(s) above and type a prompt below.</p>
-                    </div>
-                  )}
+                    )}
+                  </div>
                 </div>
               ) : (
                 commandEntries.map(entry => {
@@ -824,19 +838,19 @@ export default function App() {
               <input
                 className="command-input"
                 placeholder={
-                  !claudeLaunched ? 'Launch Claude first...'
-                    : selectedTargets.length > 0 ? `Send to ${selectedTargets.join(', ')}...`
-                    : 'Select target device(s) above...'
+                  selectedTargets.length === 0 ? 'Select target device(s) above...'
+                    : !canSend ? 'Launch Claude on at least one machine...'
+                    : `Send to ${selectedTargets.join(', ')}...`
                 }
                 value={commandInput}
                 onChange={e => setCommandInput(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && handleCommandSend()}
-                disabled={!claudeLaunched || selectedTargets.length === 0}
+                disabled={!canSend}
               />
               <button
                 className="btn btn-primary"
                 onClick={handleCommandSend}
-                disabled={!claudeLaunched || selectedTargets.length === 0 || !commandInput.trim()}
+                disabled={!canSend || !commandInput.trim()}
               >
                 Send
               </button>

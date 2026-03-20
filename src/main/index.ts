@@ -31,7 +31,19 @@ let workspace: WorkspaceManager | null = null;
 // Convenience: get current project path from workspace
 function getProjectPath(): string | null {
   if (!workspace) return null;
-  return workspace.getActiveProjectPath(lastMcpDevice || os.hostname());
+  const deviceName = lastMcpDevice || os.hostname();
+  const projectPath = workspace.getActiveProjectPath(deviceName);
+  // If we have an active project but no device-specific path, ensure folder exists
+  if (!projectPath) {
+    const activeProject = workspace.getActiveProject();
+    if (activeProject) {
+      const fallbackPath = path.join(workspace.getProjectsDir(), activeProject.name);
+      const fs = require('fs');
+      fs.mkdirSync(fallbackPath, { recursive: true });
+      return fallbackPath;
+    }
+  }
+  return projectPath;
 }
 
 // Track active terminal processes
